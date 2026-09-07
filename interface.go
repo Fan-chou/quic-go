@@ -204,6 +204,9 @@ type Connection interface {
 	// In addition, a datagram may be dropped before being sent out if the available packet size suddenly decreases.
 	// If the payload is too large to be sent at the current time, a DatagramTooLargeError is returned.
 	SendDatagram(payload []byte) error
+	// SendDatagramContext cancels waiting for queue space. Successful enqueue
+	// transfers ownership; later cancellation does not retract queued packets.
+	SendDatagramContext(ctx context.Context, payload []byte) error
 	// ReceiveDatagram gets a message received in a datagram, as specified in RFC 9221.
 	ReceiveDatagram(context.Context) ([]byte, error)
 	// ReleaseDatagram returns a datagram buffer previously handed out by

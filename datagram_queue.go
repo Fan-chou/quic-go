@@ -144,6 +144,12 @@ func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
 // Pop/sent notifications must not reset it, or a chronically full queue
 // would park the sender indefinitely.
 func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
+	return h.AddContext(context.Background(), f)
+}
+
+// AddContext cancels an enqueue without closing the shared connection.
+// Ownership of f transfers to this method, including on error.
+func (h *datagramQueue) AddContext(ctx context.Context, f *wire.DatagramFrame) error {
 	h.sendMx.Lock()
 
 	var deadline time.Time
@@ -154,6 +160,11 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 		}
 	}()
 	for {
+		if err := context.Cause(ctx); err != nil {
+			h.sendMx.Unlock()
+			wire.PutDatagramFrame(f)
+			return err
+		}
 		select {
 		case <-h.closed:
 			h.sendMx.Unlock()
@@ -182,6 +193,9 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 			// was never sent, return it to the pool.
 			wire.PutDatagramFrame(f)
 			return h.closeErr
+		case <-ctx.Done():
+			wire.PutDatagramFrame(f)
+			return context.Cause(ctx)
 		case <-h.sent:
 		case <-timer.C:
 			// Queue stayed full for the whole timeout: the transport is

@@ -876,3 +876,10 @@ func (c *MockQUICConnrunCall) DoAndReturn(f func() error) *MockQUICConnrunCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
+
+func (m *MockQUICConn) SendDatagramContext(ctx context.Context, payload []byte) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	return m.SendDatagram(payload)
+}

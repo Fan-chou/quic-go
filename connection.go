@@ -2415,6 +2415,13 @@ func (s *connection) onMTUIncreased(mtu protocol.ByteCount) {
 }
 
 func (s *connection) SendDatagram(p []byte) error {
+	return s.SendDatagramContext(context.Background(), p)
+}
+
+func (s *connection) SendDatagramContext(ctx context.Context, p []byte) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
 	if !s.supportsDatagrams() {
 		return errors.New("datagram support disabled")
 	}
@@ -2441,7 +2448,7 @@ func (s *connection) SendDatagram(p []byte) error {
 		f.Data = f.Data[:len(p)]
 	}
 	copy(f.Data, p)
-	return s.datagramQueue.Add(f)
+	return s.datagramQueue.AddContext(ctx, f)
 }
 
 func (s *connection) ReceiveDatagram(ctx context.Context) ([]byte, error) {

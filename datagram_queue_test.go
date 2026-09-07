@@ -261,3 +261,36 @@ func TestDatagramQueueCloseWithErrorDrainsQueuedFrames(t *testing.T) {
 	late := wire.GetDatagramFrame()
 	require.Error(t, queue.Add(late))
 }
+
+func TestDatagramQueueCancelPreservesSharedQueue(t *testing.T) {
+	q := newDatagramQueue(func() {}, utils.DefaultLogger)
+	defer q.CloseWithError(errors.New("done"))
+	for i := 0; i < maxDatagramSendQueueLen; i++ {
+		if err := q.Add(&wire.DatagramFrame{Data: []byte{1}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- q.AddContext(ctx, &wire.DatagramFrame{Data: []byte{2}}) }()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("enqueue did not cancel")
+	}
+	f := q.Peek()
+	q.Pop()
+	wire.PutDatagramFrame(f)
+	if err := q.AddContext(context.Background(), &wire.DatagramFrame{Data: []byte{3}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-q.closed:
+		t.Fatal("cancel closed shared connection")
+	default:
+	}
+}
