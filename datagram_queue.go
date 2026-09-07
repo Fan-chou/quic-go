@@ -100,9 +100,14 @@ func (p *datagramBufPoolT) Put(b []byte) {
 	}
 }
 
+type queuedDatagram struct {
+	frame     *wire.DatagramFrame
+	sampledAt time.Time
+}
+
 type datagramQueue struct {
 	sendMx    sync.Mutex
-	sendQueue ringbuffer.RingBuffer[*wire.DatagramFrame]
+	sendQueue ringbuffer.RingBuffer[queuedDatagram]
 	sent      chan struct{} // used to notify Add that a datagram was dequeued
 
 	rcvMx    sync.Mutex
@@ -150,6 +155,8 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 // AddContext cancels an enqueue without closing the shared connection.
 // Ownership of f transfers to this method, including on error.
 func (h *datagramQueue) AddContext(ctx context.Context, f *wire.DatagramFrame) error {
+	started := datagramEnqueueWait.start()
+	defer datagramEnqueueWait.finish(started)
 	h.sendMx.Lock()
 
 	var deadline time.Time
@@ -173,7 +180,7 @@ func (h *datagramQueue) AddContext(ctx context.Context, f *wire.DatagramFrame) e
 		default:
 		}
 		if h.sendQueue.Len() < maxDatagramSendQueueLen {
-			h.sendQueue.PushBack(f)
+			h.sendQueue.PushBack(queuedDatagram{frame: f, sampledAt: datagramQueueWait.start()})
 			h.sendMx.Unlock()
 			h.hasData()
 			return nil
@@ -216,13 +223,14 @@ func (h *datagramQueue) Peek() *wire.DatagramFrame {
 	if h.sendQueue.Empty() {
 		return nil
 	}
-	return h.sendQueue.PeekFront()
+	return h.sendQueue.PeekFront().frame
 }
 
 func (h *datagramQueue) Pop() {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
-	_ = h.sendQueue.PopFront()
+	queued := h.sendQueue.PopFront()
+	datagramQueueWait.finish(queued.sampledAt)
 	select {
 	case h.sent <- struct{}{}:
 	default:
@@ -261,6 +269,7 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 	}
 	h.rcvMx.Unlock()
 	if !queued {
+		datagramReceiveDrops.Add(1)
 		n := len(buf)
 		// Receive queue full: return the buffer to the pool instead of
 		// abandoning it for GC. Put's cap check skips non-pooled (oversized)
@@ -318,7 +327,7 @@ func (h *datagramQueue) CloseWithError(e error) {
 	// leftover entries would otherwise sit until GC.
 	h.sendMx.Lock()
 	for !h.sendQueue.Empty() {
-		wire.PutDatagramFrame(h.sendQueue.PopFront())
+		wire.PutDatagramFrame(h.sendQueue.PopFront().frame)
 	}
 	h.sendMx.Unlock()
 	h.rcvMx.Lock()

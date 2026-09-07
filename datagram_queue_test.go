@@ -222,7 +222,7 @@ func TestDatagramQueueAddTimeoutAbsoluteDeadline(t *testing.T) {
 				queue.sendMx.Lock()
 				if !queue.sendQueue.Empty() {
 					_ = queue.sendQueue.PopFront()
-					queue.sendQueue.PushBack(&wire.DatagramFrame{Data: []byte{1}})
+					queue.sendQueue.PushBack(queuedDatagram{frame: &wire.DatagramFrame{Data: []byte{1}}})
 				}
 				select {
 				case queue.sent <- struct{}{}:

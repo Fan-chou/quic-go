@@ -657,6 +657,7 @@ func (p *packetPacker) composeNextPacket(
 				pl.length += size
 				p.datagramQueue.Pop()
 			} else if !hasAck {
+				datagramPackerDrops.Add(1)
 				// The DATAGRAM frame doesn't fit, and the packet doesn't contain an ACK.
 				// Discard this frame. There's no point in retrying this in the next packet,
 				// as it's unlikely that the available packet size will increase.
