@@ -20,7 +20,8 @@ jobs:
       - name: Run tests
         env:
           TIMESCALE_FACTOR: 10
-        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -cover -randomize-all -randomize-suites -trace -skip-package integrationtests
+        # Ginkgo disables Go's test timeout. Restore it so hung TestX functions dump goroutine stacks.
+        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -cover -randomize-all -randomize-suites -trace -skip-package integrationtests -- -test.timeout=10m
       - name: Run tests as root
         if: ${{ matrix.os == 'ubuntu' }}
         env:
@@ -36,12 +37,12 @@ jobs:
         env:
           TIMESCALE_FACTOR: 10
           GOARCH: 386
-        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -cover -coverprofile coverage.txt -output-dir . -randomize-all -randomize-suites -trace -skip-package integrationtests
+        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -cover -coverprofile coverage.txt -output-dir . -randomize-all -randomize-suites -trace -skip-package integrationtests -- -test.timeout=10m
       - name: Run tests with race detector
         if: ${{ matrix.os == 'ubuntu' }} # speed things up. Windows and OSX VMs are slow
         env:
           TIMESCALE_FACTOR: 20
-        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -race -randomize-all -randomize-suites -trace -skip-package integrationtests
+        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -race -randomize-all -randomize-suites -trace -skip-package integrationtests -- -test.timeout=10m
       - name: Run benchmark tests
         run: go test -v -run=^$ -benchtime 0.5s -bench=. $(go list ./... | grep -v integrationtests/self)
       - name: Upload coverage to Codecov
