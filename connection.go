@@ -644,6 +644,7 @@ runLoop:
 		}
 
 		if s.sendQueue.WouldBlock() {
+			s.datagramQueue.observeSendLimit(2)
 			// The send queue is still busy sending out packets.
 			// Wait until there's space to enqueue new packets.
 			sendQueueAvailable = s.sendQueue.Available()
@@ -1866,6 +1867,7 @@ func (s *connection) triggerSending(now time.Time) error {
 	case ackhandler.SendNone:
 		return nil
 	case ackhandler.SendPacingLimited:
+		s.datagramQueue.observeSendLimit(0)
 		deadline := s.sentPacketHandler.TimeUntilSend()
 		if deadline.IsZero() {
 			deadline = deadlineSendImmediately
@@ -1876,6 +1878,9 @@ func (s *connection) triggerSending(now time.Time) error {
 		// sends enough ACKs to allow its peer to utilize the bandwidth.
 		fallthrough
 	case ackhandler.SendAck:
+		if sendMode == ackhandler.SendAck {
+			s.datagramQueue.observeSendLimit(1)
+		}
 		// We can at most send a single ACK only packet.
 		// There will only be a new ACK after receiving new packets.
 		// SendAck is only returned when we're congestion limited, so we don't need to set the pacing timer.
