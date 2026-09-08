@@ -51,9 +51,11 @@ func (o *datagramWaitObservation) snapshot() map[string]any {
 	return map[string]any{"last_slow_sample": o.lastSlow.Load(), "operations": o.operations.Load(), "sample_every": 64, "bucket_upper_ms": []string{"1", "5", "20", "50", "100", "200", "500", "1000", "+Inf"}, "samples": counts}
 }
 
-var datagramEnqueueWait, datagramQueueWait datagramWaitObservation
-var datagramReceiveDrops, datagramPackerDrops atomic.Uint64
-var datagramSendLimited [3]atomic.Uint64
+var (
+	datagramEnqueueWait, datagramQueueWait    datagramWaitObservation
+	datagramReceiveDrops, datagramPackerDrops atomic.Uint64
+	datagramSendLimited                       [3]atomic.Uint64
+)
 
 // These count scheduling decisions while DATAGRAMs are pending, not packets
 // lost or time spent blocked. A packet can encounter more than one reason.

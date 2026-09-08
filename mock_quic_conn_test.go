@@ -15,7 +15,6 @@ import (
 	reflect "reflect"
 
 	congestion "github.com/olicesx/quic-go/congestion"
-	qerr "github.com/olicesx/quic-go/internal/qerr"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -122,7 +121,7 @@ func (c *MockQUICConnAcceptUniStreamCall) DoAndReturn(f func(context.Context) (R
 }
 
 // CloseWithError mocks base method.
-func (m *MockQUICConn) CloseWithError(arg0 qerr.ApplicationErrorCode, arg1 string) error {
+func (m *MockQUICConn) CloseWithError(arg0 ApplicationErrorCode, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CloseWithError", arg0, arg1)
 	ret0, _ := ret[0].(error)
@@ -148,13 +147,13 @@ func (c *MockQUICConnCloseWithErrorCall) Return(arg0 error) *MockQUICConnCloseWi
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockQUICConnCloseWithErrorCall) Do(f func(qerr.ApplicationErrorCode, string) error) *MockQUICConnCloseWithErrorCall {
+func (c *MockQUICConnCloseWithErrorCall) Do(f func(ApplicationErrorCode, string) error) *MockQUICConnCloseWithErrorCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockQUICConnCloseWithErrorCall) DoAndReturn(f func(qerr.ApplicationErrorCode, string) error) *MockQUICConnCloseWithErrorCall {
+func (c *MockQUICConnCloseWithErrorCall) DoAndReturn(f func(ApplicationErrorCode, string) error) *MockQUICConnCloseWithErrorCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -657,6 +656,44 @@ func (c *MockQUICConnSendDatagramCall) DoAndReturn(f func([]byte) error) *MockQU
 	return c
 }
 
+// SendDatagramContext mocks base method.
+func (m *MockQUICConn) SendDatagramContext(ctx context.Context, payload []byte) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SendDatagramContext", ctx, payload)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SendDatagramContext indicates an expected call of SendDatagramContext.
+func (mr *MockQUICConnMockRecorder) SendDatagramContext(ctx, payload any) *MockQUICConnSendDatagramContextCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendDatagramContext", reflect.TypeOf((*MockQUICConn)(nil).SendDatagramContext), ctx, payload)
+	return &MockQUICConnSendDatagramContextCall{Call: call}
+}
+
+// MockQUICConnSendDatagramContextCall wrap *gomock.Call
+type MockQUICConnSendDatagramContextCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockQUICConnSendDatagramContextCall) Return(arg0 error) *MockQUICConnSendDatagramContextCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockQUICConnSendDatagramContextCall) Do(f func(context.Context, []byte) error) *MockQUICConnSendDatagramContextCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockQUICConnSendDatagramContextCall) DoAndReturn(f func(context.Context, []byte) error) *MockQUICConnSendDatagramContextCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // SetCongestionControl mocks base method.
 func (m *MockQUICConn) SetCongestionControl(arg0 congestion.CongestionControl) {
 	m.ctrl.T.Helper()
@@ -694,7 +731,7 @@ func (c *MockQUICConnSetCongestionControlCall) DoAndReturn(f func(congestion.Con
 }
 
 // closeWithTransportError mocks base method.
-func (m *MockQUICConn) closeWithTransportError(arg0 qerr.TransportErrorCode) {
+func (m *MockQUICConn) closeWithTransportError(arg0 TransportErrorCode) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "closeWithTransportError", arg0)
 }
@@ -718,13 +755,13 @@ func (c *MockQUICConncloseWithTransportErrorCall) Return() *MockQUICConncloseWit
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockQUICConncloseWithTransportErrorCall) Do(f func(qerr.TransportErrorCode)) *MockQUICConncloseWithTransportErrorCall {
+func (c *MockQUICConncloseWithTransportErrorCall) Do(f func(TransportErrorCode)) *MockQUICConncloseWithTransportErrorCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockQUICConncloseWithTransportErrorCall) DoAndReturn(f func(qerr.TransportErrorCode)) *MockQUICConncloseWithTransportErrorCall {
+func (c *MockQUICConncloseWithTransportErrorCall) DoAndReturn(f func(TransportErrorCode)) *MockQUICConncloseWithTransportErrorCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -875,11 +912,4 @@ func (c *MockQUICConnrunCall) Do(f func() error) *MockQUICConnrunCall {
 func (c *MockQUICConnrunCall) DoAndReturn(f func() error) *MockQUICConnrunCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
-}
-
-func (m *MockQUICConn) SendDatagramContext(ctx context.Context, payload []byte) error {
-	if err := context.Cause(ctx); err != nil {
-		return err
-	}
-	return m.SendDatagram(payload)
 }
