@@ -19,10 +19,12 @@ func TestDatagramQueuePeekAndPop(t *testing.T) {
 	require.Empty(t, queued)
 	require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte("foo")}))
 	require.Len(t, queued, 1)
+	require.Equal(t, 1, (&connection{datagramQueue: queue}).DatagramSendQueueLen())
 	require.Equal(t, &wire.DatagramFrame{Data: []byte("foo")}, queue.Peek())
 	// calling peek again returns the same datagram
 	require.Equal(t, &wire.DatagramFrame{Data: []byte("foo")}, queue.Peek())
 	queue.Pop()
+	require.Zero(t, (&connection{datagramQueue: queue}).DatagramSendQueueLen())
 	require.Nil(t, queue.Peek())
 }
 

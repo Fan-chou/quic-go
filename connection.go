@@ -2493,3 +2493,14 @@ func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
 func (s *connection) SetCongestionControl(cc congestion.CongestionControl) {
 	s.sentPacketHandler.SetCongestionControl(cc)
 }
+
+// DatagramSendQueueLen reports local DATAGRAMs awaiting packet assembly.
+// It is intended for occasional overload diagnostics, not per-packet polling.
+func (s *connection) DatagramSendQueueLen() int {
+	if s.datagramQueue == nil {
+		return 0
+	}
+	s.datagramQueue.sendMx.Lock()
+	defer s.datagramQueue.sendMx.Unlock()
+	return s.datagramQueue.sendQueue.Len()
+}
