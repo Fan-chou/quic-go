@@ -10,8 +10,19 @@ import (
 // describe local waiting, not end-to-end latency or successful delivery.
 // The snapshot is served by the existing localhost diagnostics listener.
 type datagramSlowSample struct {
-	At           string  `json:"at"`
-	Milliseconds float64 `json:"milliseconds"`
+	At           string                   `json:"at"`
+	Milliseconds float64                  `json:"milliseconds"`
+	Transport    *datagramTransportSample `json:"transport,omitempty"`
+}
+
+// Captured on the connection send loop, never from the expvar reader.
+// This is state at dequeue time, not proof of the cause of the preceding wait.
+type datagramTransportSample struct {
+	Local                   string  `json:"local"`
+	Remote                  string  `json:"remote"`
+	SmoothedRTTMilliseconds float64 `json:"smoothed_rtt_ms"`
+	LatestRTTMilliseconds   float64 `json:"latest_rtt_ms"`
+	PendingAfterPop         int     `json:"pending_after_pop"`
 }
 
 type datagramWaitObservation struct {
@@ -28,6 +39,10 @@ func (o *datagramWaitObservation) start() time.Time {
 }
 
 func (o *datagramWaitObservation) finish(start time.Time) {
+	o.finishWithTransport(start, nil)
+}
+
+func (o *datagramWaitObservation) finishWithTransport(start time.Time, transport func() *datagramTransportSample) {
 	if start.IsZero() {
 		return
 	}
@@ -39,7 +54,11 @@ func (o *datagramWaitObservation) finish(start time.Time) {
 	}
 	o.buckets[i].Add(1)
 	if elapsed >= 100*time.Millisecond {
-		o.lastSlow.Store(&datagramSlowSample{At: time.Now().UTC().Format(time.RFC3339Nano), Milliseconds: float64(elapsed) / float64(time.Millisecond)})
+		sample := &datagramSlowSample{At: time.Now().UTC().Format(time.RFC3339Nano), Milliseconds: float64(elapsed) / float64(time.Millisecond)}
+		if transport != nil {
+			sample.Transport = transport()
+		}
+		o.lastSlow.Store(sample)
 	}
 }
 

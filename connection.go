@@ -491,6 +491,16 @@ func (s *connection) preSetup() {
 	s.creationTime = now
 
 	s.datagramQueue = newDatagramQueue(s.scheduleSending, s.logger)
+	s.datagramQueue.slowTransportSample = func() *datagramTransportSample {
+		// Pop holds sendMx and runs on the connection send loop.
+		return &datagramTransportSample{
+			Local:                   s.conn.LocalAddr().String(),
+			Remote:                  s.conn.RemoteAddr().String(),
+			SmoothedRTTMilliseconds: float64(s.rttStats.SmoothedRTT()) / float64(time.Millisecond),
+			LatestRTTMilliseconds:   float64(s.rttStats.LatestRTT()) / float64(time.Millisecond),
+			PendingAfterPop:         s.datagramQueue.sendQueue.Len(),
+		}
+	}
 	s.connState.Version = s.version
 }
 

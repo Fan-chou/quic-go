@@ -124,6 +124,8 @@ type datagramQueue struct {
 	closed   chan struct{}
 
 	hasData func()
+	// Installed before the connection starts; invoked only for slow send samples.
+	slowTransportSample func() *datagramTransportSample
 
 	logger utils.Logger
 }
@@ -230,7 +232,7 @@ func (h *datagramQueue) Pop() {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
 	queued := h.sendQueue.PopFront()
-	datagramQueueWait.finish(queued.sampledAt)
+	datagramQueueWait.finishWithTransport(queued.sampledAt, h.slowTransportSample)
 	select {
 	case h.sent <- struct{}{}:
 	default:
