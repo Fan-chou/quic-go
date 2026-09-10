@@ -50,7 +50,10 @@ func BenchmarkStreamChurn(b *testing.B) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	conn, err := quic.Dial(ctx, newUPDConnLocalhost(b), ln.Addr(), tlsClientConfig, nil)
+	// Own the transport so benchmark cleanup waits for its receive loop too.
+	tr := &quic.Transport{Conn: newUPDConnLocalhost(b)}
+	defer tr.Close()
+	conn, err := tr.Dial(ctx, ln.Addr(), tlsClientConfig, nil)
 	require.NoError(b, err)
 	defer conn.CloseWithError(0, "")
 

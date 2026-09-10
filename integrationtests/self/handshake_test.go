@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -119,16 +121,31 @@ func TestHandshakeCipherSuites(t *testing.T) {
 		tls.TLS_CHACHA20_POLY1305_SHA256,
 	} {
 		t.Run(tls.CipherSuiteName(suiteID), func(t *testing.T) {
-			reset := qtls.SetCipherSuite(suiteID)
-			defer reset()
+			// SetCipherSuite mutates crypto/tls process globals. A previous test's
+			// server may still be issuing a ticket, so isolate each suite in a
+			// fresh process and leave its globals unchanged until process exit.
+			if os.Getenv("QUIC_TEST_CIPHER_SUITE_CHILD") != "1" {
+				ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(10*time.Second))
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHandshakeCipherSuites$/^"+tls.CipherSuiteName(suiteID)+"$", "-version="+strings.TrimPrefix(version.String(), "v"))
+				cmd.Env = append(os.Environ(), "QUIC_TEST_CIPHER_SUITE_CHILD=1")
+				output, err := cmd.CombinedOutput()
+				require.NoError(t, err, "%s", output)
+				return
+			}
+			_ = qtls.SetCipherSuite(suiteID)
 
-			ln, err := quic.Listen(newUPDConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
+			serverTransport := &quic.Transport{Conn: newUPDConnLocalhost(t)}
+			defer serverTransport.Close()
+			ln, err := serverTransport.Listen(getTLSConfig(), getQuicConfig(nil))
 			require.NoError(t, err)
 			defer ln.Close()
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			conn, err := quic.Dial(ctx, newUPDConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+			clientTransport := &quic.Transport{Conn: newUPDConnLocalhost(t)}
+			defer clientTransport.Close()
+			conn, err := clientTransport.Dial(ctx, ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 			require.NoError(t, err)
 			defer conn.CloseWithError(0, "")
 
