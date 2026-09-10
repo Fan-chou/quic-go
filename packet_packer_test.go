@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -610,6 +611,71 @@ func TestPackLargeDatagramFrame(t *testing.T) {
 	p, err = tp.packer.AppendPacket(buffer, newMaxPacketSize, time.Now(), protocol.Version1)
 	require.ErrorIs(t, err, errNothingToPack)
 	require.Nil(t, tp.datagramQueue.Peek()) // make sure the frame is gone
+}
+
+func TestPackQueuedSmallDatagrams(t *testing.T) {
+	for _, frameBudget := range []protocol.ByteCount{250, 1200} {
+		t.Run(fmt.Sprint(frameBudget), func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			tp := newTestPacketPacker(t, ctrl, protocol.PerspectiveServer)
+			tp.framer.EXPECT().HasData().AnyTimes()
+			for i := byte(0); i < 10; i++ {
+				require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{
+					DataLenPresent: true, Data: bytes.Repeat([]byte{i}, 62),
+				}))
+			}
+			var received [][]byte
+			packets := 0
+			beforeDrops := datagramPackerDrops.Load()
+			for tp.datagramQueue.Peek() != nil {
+				pl := tp.packer.composeNextPacket(frameBudget, false, false, time.Now(), protocol.Version1)
+				require.NotEmpty(t, pl.frames)
+				require.LessOrEqual(t, pl.length, frameBudget)
+				for _, f := range pl.frames {
+					received = append(received, f.Frame.(*wire.DatagramFrame).Data)
+				}
+				packets++
+			}
+			require.Len(t, received, 10)
+			for i, data := range received {
+				require.Equal(t, bytes.Repeat([]byte{byte(i)}, 62), data)
+			}
+			require.Equal(t, beforeDrops, datagramPackerDrops.Load())
+			if frameBudget == 250 {
+				require.Equal(t, 4, packets)
+			} else {
+				require.Equal(t, 1, packets)
+			}
+		})
+	}
+}
+
+func TestPackDatagramsLeavesRoomForReliableData(t *testing.T) {
+	for _, retransmit := range []bool{false, true} {
+		t.Run(fmt.Sprint(retransmit), func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			tp := newTestPacketPacker(t, ctrl, protocol.PerspectiveServer)
+			for i := 0; i < 10; i++ {
+				require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, 62)}))
+			}
+			tp.framer.EXPECT().HasData().Return(!retransmit)
+			if retransmit {
+				tp.retransmissionQueue.addAppData(&wire.PingFrame{})
+			} else {
+				tp.framer.EXPECT().Append(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+					func(frames []ackhandler.Frame, streams []ackhandler.StreamFrame, available protocol.ByteCount, _ time.Time, _ protocol.Version) ([]ackhandler.Frame, []ackhandler.StreamFrame, protocol.ByteCount) {
+						require.Len(t, frames, 1)
+						require.Greater(t, available, protocol.ByteCount(1100))
+						return append(frames, ackhandler.Frame{Frame: &wire.PingFrame{}}), streams, 1
+					})
+			}
+			pl := tp.packer.composeNextPacket(1200, false, false, time.Now(), protocol.Version1)
+			require.Len(t, pl.frames, 2)
+			require.IsType(t, &wire.DatagramFrame{}, pl.frames[0].Frame)
+			require.IsType(t, &wire.PingFrame{}, pl.frames[1].Frame)
+			require.NotNil(t, tp.datagramQueue.Peek())
+		})
+	}
 }
 
 func TestPackRetransmissions(t *testing.T) {

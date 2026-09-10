@@ -650,13 +650,19 @@ func (p *packetPacker) composeNextPacket(
 	}
 
 	if p.datagramQueue != nil {
-		if f := p.datagramQueue.Peek(); f != nil {
+		for f := p.datagramQueue.Peek(); f != nil; f = p.datagramQueue.Peek() {
 			size := f.Length(v)
 			if size <= maxFrameSize-pl.length { // DATAGRAM frame fits
 				pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
 				pl.length += size
 				p.datagramQueue.Pop()
-			} else if !hasAck {
+				// Only use spare capacity when no stream/control data or
+				// retransmission is waiting. Never delay a packet to batch.
+				if hasData || hasRetransmission || !f.DataLenPresent {
+					break
+				}
+				continue
+			} else if !hasAck && len(pl.frames) == 0 {
 				datagramPackerDrops.Add(1)
 				// The DATAGRAM frame doesn't fit, and the packet doesn't contain an ACK.
 				// Discard this frame. There's no point in retrying this in the next packet,
@@ -666,6 +672,9 @@ func (p *packetPacker) composeNextPacket(
 				wire.PutDatagramFrame(f)
 			}
 			// If the DATAGRAM frame was too large and the packet contained an ACK, we'll try to send it out later.
+			// Likewise, a frame that doesn't fit after earlier DATAGRAMs
+			// must remain queued for the next packet.
+			break
 		}
 	}
 

@@ -14,8 +14,8 @@ import (
 
 const (
 	// maxDatagramSendQueueLen bounds the per-connection DATAGRAM send queue.
-	// Each QUIC packet packs at most one DATAGRAM frame (packet_packer.go),
-	// and the send loop (sendPacketsWithoutGSO) checks SendMode after every
+	// Small queued DATAGRAMs can share a packet when no reliable data is
+	// pending. The send loop (sendPacketsWithoutGSO) checks SendMode after every
 	// packet — if the pacer or cwnd limits sending, the loop returns and
 	// remaining datagrams wait. With the upstream default of 32, a burst of
 	// UDP relay packets (e.g. game ticks at 60-120 Hz) during concurrent TCP
