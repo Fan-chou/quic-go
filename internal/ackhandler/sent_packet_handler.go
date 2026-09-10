@@ -62,6 +62,8 @@ type alarmTimer struct {
 }
 
 type sentPacketHandler struct {
+	ackOnlyPackets uint64
+	ackOnlyBytes   protocol.ByteCount
 	initialPackets   *packetNumberSpace
 	handshakePackets *packetNumberSpace
 	appDataPackets   *packetNumberSpace
@@ -286,6 +288,8 @@ func (h *sentPacketHandler) SentPacket(
 	}
 
 	if !isAckEliciting {
+		h.ackOnlyPackets++
+		h.ackOnlyBytes += size
 		pnSpace.history.SentNonAckElicitingPacket(pn)
 		if !h.peerCompletedAddressValidation {
 			h.setLossDetectionTimer(t)

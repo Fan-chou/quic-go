@@ -493,7 +493,13 @@ func (s *connection) preSetup() {
 	s.datagramQueue = newDatagramQueue(s.scheduleSending, s.logger)
 	s.datagramQueue.slowTransportSample = func() *datagramTransportSample {
 		// Pop holds sendMx and runs on the connection send loop.
+		var sendState map[string]any
+		if observer, ok := s.sentPacketHandler.(interface{ DatagramSendState() map[string]any }); ok {
+			sendState = observer.DatagramSendState()
+		}
 		return &datagramTransportSample{
+			At:                      time.Now().UTC().Format(time.RFC3339Nano),
+			SendState:               sendState,
 			Local:                   s.conn.LocalAddr().String(),
 			Remote:                  s.conn.RemoteAddr().String(),
 			SmoothedRTTMilliseconds: float64(s.rttStats.SmoothedRTT()) / float64(time.Millisecond),

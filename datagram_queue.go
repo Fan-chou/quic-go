@@ -126,6 +126,7 @@ type datagramQueue struct {
 	hasData func()
 	// Installed before the connection starts; invoked only for slow send samples.
 	slowTransportSample func() *datagramTransportSample
+	lastLimitSample     [3]time.Time
 
 	logger utils.Logger
 }

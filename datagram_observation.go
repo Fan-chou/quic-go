@@ -18,11 +18,14 @@ type datagramSlowSample struct {
 // Captured on the connection send loop, never from the expvar reader.
 // This is state at dequeue time, not proof of the cause of the preceding wait.
 type datagramTransportSample struct {
-	Local                   string  `json:"local"`
-	Remote                  string  `json:"remote"`
-	SmoothedRTTMilliseconds float64 `json:"smoothed_rtt_ms"`
-	LatestRTTMilliseconds   float64 `json:"latest_rtt_ms"`
-	PendingAfterPop         int     `json:"pending_after_pop"`
+	At                      string         `json:"at"`
+	SendState               map[string]any `json:"send_state,omitempty"`
+	Local                   string         `json:"local"`
+	Remote                  string         `json:"remote"`
+	SmoothedRTTMilliseconds float64        `json:"smoothed_rtt_ms"`
+	LatestRTTMilliseconds   float64        `json:"latest_rtt_ms"`
+	PendingAfterPop         int            `json:"pending_after_pop,omitempty"`
+	PendingAtLimit          *int           `json:"pending_at_limit,omitempty"`
 }
 
 type datagramWaitObservation struct {
@@ -53,7 +56,9 @@ func (o *datagramWaitObservation) finishWithTransport(start time.Time, transport
 		i++
 	}
 	o.buckets[i].Add(1)
-	if elapsed >= 100*time.Millisecond {
+	// A full DATAGRAM queue can overflow its upstream before waiting 100ms.
+	// Keep the transport snapshot bounded by the existing 1/64 sampling.
+	if elapsed >= 100*time.Millisecond || (transport != nil && elapsed >= 20*time.Millisecond) {
 		sample := &datagramSlowSample{At: time.Now().UTC().Format(time.RFC3339Nano), Milliseconds: float64(elapsed) / float64(time.Millisecond)}
 		if transport != nil {
 			sample.Transport = transport()
@@ -74,6 +79,7 @@ var (
 	datagramEnqueueWait, datagramQueueWait    datagramWaitObservation
 	datagramReceiveDrops, datagramPackerDrops atomic.Uint64
 	datagramSendLimited                       [3]atomic.Uint64
+	datagramLimitSamples                      [3]atomic.Pointer[datagramTransportSample]
 )
 
 // These count scheduling decisions while DATAGRAMs are pending, not packets
@@ -84,6 +90,17 @@ func (h *datagramQueue) observeSendLimit(reason int) {
 	}
 	h.sendMx.Lock()
 	pending := !h.sendQueue.Empty()
+	if pending && h.slowTransportSample != nil {
+		now := time.Now()
+		if now.Sub(h.lastLimitSample[reason]) >= 100*time.Millisecond {
+			h.lastLimitSample[reason] = now
+			sample := h.slowTransportSample()
+			pending := h.sendQueue.Len()
+			sample.PendingAtLimit = &pending
+			sample.PendingAfterPop = 0
+			datagramLimitSamples[reason].Store(sample)
+		}
+	}
 	h.sendMx.Unlock()
 	if pending {
 		datagramSendLimited[reason].Add(1)
@@ -92,6 +109,6 @@ func (h *datagramQueue) observeSendLimit(reason int) {
 
 func init() {
 	expvar.Publish("quic_datagram", expvar.Func(func() any {
-		return map[string]any{"send_limit_events": map[string]uint64{"pacing": datagramSendLimited[0].Load(), "congestion": datagramSendLimited[1].Load(), "sender_queue": datagramSendLimited[2].Load()}, "enqueue_wait": datagramEnqueueWait.snapshot(), "send_queue_wait": datagramQueueWait.snapshot(), "receive_queue_drops": datagramReceiveDrops.Load(), "packer_size_drops": datagramPackerDrops.Load()}
+		return map[string]any{"send_limit_samples": map[string]any{"pacing": datagramLimitSamples[0].Load(), "congestion": datagramLimitSamples[1].Load(), "sender_queue": datagramLimitSamples[2].Load()}, "send_limit_events": map[string]uint64{"pacing": datagramSendLimited[0].Load(), "congestion": datagramSendLimited[1].Load(), "sender_queue": datagramSendLimited[2].Load()}, "enqueue_wait": datagramEnqueueWait.snapshot(), "send_queue_wait": datagramQueueWait.snapshot(), "receive_queue_drops": datagramReceiveDrops.Load(), "packer_size_drops": datagramPackerDrops.Load()}
 	}))
 }
