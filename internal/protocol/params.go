@@ -9,7 +9,9 @@ const DesiredReceiveBufferSize = (1 << 20) * 8 // 8 MB
 const DesiredSendBufferSize = (1 << 20) * 8 // 8 MB
 
 // InitialPacketSize is the initial (before Path MTU discovery) maximum packet size used.
-const InitialPacketSize = 1280
+// Start at the QUIC minimum; 1280-byte IP paths cannot carry a 1280-byte
+// UDP payload. PMTU discovery may increase this after the handshake.
+const InitialPacketSize = 1200
 
 // MaxCongestionWindowPackets is the maximum congestion window in packet.
 const MaxCongestionWindowPackets = 20000
