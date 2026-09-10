@@ -168,7 +168,10 @@ var _ = Describe("Cubic", func() {
 		// packet, because our byte-wise Reno algorithm is always a slight
 		// under-estimation).  Without per-ack updates, the current_cwnd
 		// would otherwise be unchanged.
-		minimumExpectedIncrease := maxDatagramSize * 9 / 10
+		// Each byte-wise Reno update truncates a fractional byte. Account
+		// for that per-ACK rounding instead of assuming a fixed 10% bound,
+		// which is too tight with a 1200-byte initial datagram.
+		minimumExpectedIncrease := maxDatagramSize - protocol.ByteCount(maxAcks+1)
 		Expect(currentCwnd).To(BeNumerically(">", initialCwnd+minimumExpectedIncrease))
 	})
 

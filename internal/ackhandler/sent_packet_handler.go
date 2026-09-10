@@ -62,8 +62,8 @@ type alarmTimer struct {
 }
 
 type sentPacketHandler struct {
-	ackOnlyPackets uint64
-	ackOnlyBytes   protocol.ByteCount
+	ackOnlyPackets   uint64
+	ackOnlyBytes     protocol.ByteCount
 	initialPackets   *packetNumberSpace
 	handshakePackets *packetNumberSpace
 	appDataPackets   *packetNumberSpace
