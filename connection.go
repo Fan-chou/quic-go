@@ -1873,6 +1873,12 @@ func (s *connection) applyTransportParameters() {
 }
 
 func (s *connection) triggerSending(now time.Time) error {
+	// A pacing wakeup can precede another pack attempt even after supply ran dry.
+	// Only report after handshake confirmation, when application queues describe
+	// all data available to the normal short-header sender.
+	if s.handshakeConfirmed {
+		s.reportApplicationLimited()
+	}
 	s.pacingDeadline = time.Time{}
 
 	sendMode := s.sentPacketHandler.SendMode(now)
@@ -1915,6 +1921,24 @@ func (s *connection) triggerSending(now time.Time) error {
 	}
 }
 
+// reportApplicationLimited checks supply, independently of transport limits.
+// An undersized GSO tail or queued DATAGRAM must not be mistaken for
+// exhausted application supply.
+func (s *connection) reportApplicationLimited() {
+	observer, ok := s.sentPacketHandler.(interface{ OnApplicationLimited() })
+	if !ok {
+		return
+	}
+	if s.sendQueue != nil && s.sendQueue.WouldBlock() {
+		return
+	}
+	if s.framer.HasData() || s.retransmissionQueue.HasAppData() ||
+		(s.datagramQueue != nil && s.datagramQueue.Peek() != nil) {
+		return
+	}
+	observer.OnApplicationLimited()
+}
+
 func (s *connection) sendPackets(now time.Time) error {
 	// Path MTU Discovery
 	// Can't use GSO, since we need to send a single packet that's larger than our current maximum size.
@@ -1947,6 +1971,9 @@ func (s *connection) sendPackets(now time.Time) error {
 	if !s.handshakeConfirmed {
 		packet, err := s.packer.PackCoalescedPacket(false, s.maxPacketSize(), now, s.version)
 		if err != nil || packet == nil {
+			if err == nil {
+				s.reportApplicationLimited()
+			}
 			return err
 		}
 		s.sentFirstPacket = true
@@ -1974,6 +2001,7 @@ func (s *connection) sendPacketsWithoutGSO(now time.Time) error {
 		ecn := s.sentPacketHandler.ECNMode(true)
 		if _, err := s.appendOneShortHeaderPacket(buf, s.maxPacketSize(), ecn, now); err != nil {
 			if err == errNothingToPack {
+				s.reportApplicationLimited()
 				buf.Release()
 				return nil
 			}
@@ -2049,6 +2077,7 @@ func (s *connection) sendPacketsWithGSO(now time.Time) error {
 				if err != errNothingToPack {
 					return err
 				}
+				s.reportApplicationLimited()
 				if buf.Len() == 0 {
 					buf.Release()
 					return nil

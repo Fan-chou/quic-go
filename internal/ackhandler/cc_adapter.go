@@ -68,3 +68,9 @@ func (a *ccAdapter) InRecovery() bool {
 func (a *ccAdapter) GetCongestionWindow() protocol.ByteCount {
 	return protocol.ByteCount(a.CC.GetCongestionWindow())
 }
+
+func (a *ccAdapter) SetApplicationLimited(limited bool) {
+	if cc, ok := a.CC.(congestion.ApplicationLimitedController); ok {
+		cc.SetApplicationLimited(limited)
+	}
+}

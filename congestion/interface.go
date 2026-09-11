@@ -61,3 +61,12 @@ type RTTStatsProvider interface {
 	SetMaxAckDelay(mad time.Duration)
 	SetInitialRTT(t time.Duration)
 }
+
+// ApplicationLimitedController optionally receives application supply state from
+// the connection's send loop. false enables explicit reporting; true reports
+// that application data is exhausted. Transport backpressure alone is not
+// application limitation: the connection must first check all application queues.
+// Calls are serialized with congestion events on the connection goroutine.
+type ApplicationLimitedController interface {
+	SetApplicationLimited(bool)
+}

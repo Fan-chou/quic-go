@@ -971,6 +971,16 @@ func (h *sentPacketHandler) getCongestionControl() congestion.SendAlgorithmWithD
 func (h *sentPacketHandler) SetCongestionControl(cc congestionExt.CongestionControl) {
 	h.congestionMutex.Lock()
 	cc.SetRTTStatsProvider(h.rttStats)
+	if observer, ok := cc.(congestionExt.ApplicationLimitedController); ok {
+		observer.SetApplicationLimited(false)
+	}
 	h.congestion = &ccAdapter{cc}
 	h.congestionMutex.Unlock()
+}
+
+// OnApplicationLimited is an optional send-loop hook, not an ACK-time guess.
+func (h *sentPacketHandler) OnApplicationLimited() {
+	if cc, ok := h.getCongestionControl().(interface{ SetApplicationLimited(bool) }); ok {
+		cc.SetApplicationLimited(true)
+	}
 }
