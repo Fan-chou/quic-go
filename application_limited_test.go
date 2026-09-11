@@ -1,9 +1,10 @@
 package quic
 
 import (
+	"testing"
+
 	"github.com/olicesx/quic-go/internal/ackhandler"
 	"github.com/olicesx/quic-go/internal/wire"
-	"testing"
 )
 
 type applicationLimitedHandler struct {

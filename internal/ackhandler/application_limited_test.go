@@ -1,8 +1,9 @@
 package ackhandler
 
 import (
-	"github.com/olicesx/quic-go/congestion"
 	"testing"
+
+	"github.com/olicesx/quic-go/congestion"
 )
 
 type applicationSupplyCC struct {
