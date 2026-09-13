@@ -296,3 +296,36 @@ func TestDatagramQueueCancelPreservesSharedQueue(t *testing.T) {
 	default:
 	}
 }
+
+func TestDatagramObservationIdentifiesConnection(t *testing.T) {
+	q := newDatagramQueue(func() {}, utils.DefaultLogger)
+	other := newDatagramQueue(func() {}, utils.DefaultLogger)
+	conn := &connection{datagramQueue: q}
+	id, state := conn.DatagramSendObservation()
+	require.NotZero(t, id)
+	require.NotEqual(t, id, other.observationID)
+	require.Empty(t, state)
+	q.slowTransportSample = func() *datagramTransportSample {
+		return &datagramTransportSample{At: "sample-time", SendState: map[string]any{"cwnd": 1234}}
+	}
+	require.NoError(t, q.Add(&wire.DatagramFrame{Data: []byte("foo")}))
+	q.observeSendLimit(1)
+	id2, state := conn.DatagramSendObservation()
+	require.Equal(t, id, id2)
+	require.Contains(t, state, `"reason":"congestion"`)
+	require.Contains(t, state, `"pending_at_limit":1`)
+	// Concurrent readers access immutable snapshots while the send loop publishes.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			conn.DatagramSendObservation()
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		q.observeDequeue()
+	}
+	<-done
+	_, state = conn.DatagramSendObservation()
+	require.Contains(t, state, `"reason":"dequeue"`)
+}

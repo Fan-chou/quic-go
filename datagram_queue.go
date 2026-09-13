@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/olicesx/quic-go/internal/protocol"
@@ -127,17 +128,20 @@ type datagramQueue struct {
 	// Installed before the connection starts; invoked only for slow send samples.
 	slowTransportSample func() *datagramTransportSample
 	lastLimitSample     [3]time.Time
+	observationID       uint64
+	lastSendObservation atomic.Pointer[datagramTransportSample]
 
 	logger utils.Logger
 }
 
 func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
 	return &datagramQueue{
-		hasData: hasData,
-		rcvd:    make(chan struct{}, 1),
-		sent:    make(chan struct{}, 1),
-		closed:  make(chan struct{}),
-		logger:  logger,
+		hasData:       hasData,
+		observationID: datagramObservationIDs.Add(1),
+		rcvd:          make(chan struct{}, 1),
+		sent:          make(chan struct{}, 1),
+		closed:        make(chan struct{}),
+		logger:        logger,
 		// Pre-allocate the receive queue so steady-state enqueue never
 		// triggers slice growth allocations.
 		rcvQueue: make([][]byte, 0, maxDatagramRcvQueueLen),
@@ -233,7 +237,7 @@ func (h *datagramQueue) Pop() {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
 	queued := h.sendQueue.PopFront()
-	datagramQueueWait.finishWithTransport(queued.sampledAt, h.slowTransportSample)
+	datagramQueueWait.finishWithTransport(queued.sampledAt, h.observeDequeue)
 	select {
 	case h.sent <- struct{}{}:
 	default:

@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"encoding/json"
 	"expvar"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,8 @@ type datagramSlowSample struct {
 // Captured on the connection send loop, never from the expvar reader.
 // This is state at dequeue time, not proof of the cause of the preceding wait.
 type datagramTransportSample struct {
+	ConnectionID            uint64         `json:"connection_id"`
+	Reason                  string         `json:"reason"`
 	At                      string         `json:"at"`
 	SendState               map[string]any `json:"send_state,omitempty"`
 	Local                   string         `json:"local"`
@@ -76,6 +79,7 @@ func (o *datagramWaitObservation) snapshot() map[string]any {
 }
 
 var (
+	datagramObservationIDs                    atomic.Uint64
 	datagramEnqueueWait, datagramQueueWait    datagramWaitObservation
 	datagramReceiveDrops, datagramPackerDrops atomic.Uint64
 	datagramSendLimited                       [3]atomic.Uint64
@@ -98,6 +102,9 @@ func (h *datagramQueue) observeSendLimit(reason int) {
 			pending := h.sendQueue.Len()
 			sample.PendingAtLimit = &pending
 			sample.PendingAfterPop = 0
+			sample.ConnectionID = h.observationID
+			sample.Reason = [...]string{"pacing", "congestion", "sender_queue"}[reason]
+			h.lastSendObservation.Store(sample)
 			datagramLimitSamples[reason].Store(sample)
 		}
 	}
@@ -111,4 +118,34 @@ func init() {
 	expvar.Publish("quic_datagram", expvar.Func(func() any {
 		return map[string]any{"send_limit_samples": map[string]any{"pacing": datagramLimitSamples[0].Load(), "congestion": datagramLimitSamples[1].Load(), "sender_queue": datagramLimitSamples[2].Load()}, "send_limit_events": map[string]uint64{"pacing": datagramSendLimited[0].Load(), "congestion": datagramSendLimited[1].Load(), "sender_queue": datagramSendLimited[2].Load()}, "enqueue_wait": datagramEnqueueWait.snapshot(), "send_queue_wait": datagramQueueWait.snapshot(), "receive_queue_drops": datagramReceiveDrops.Load(), "packer_size_drops": datagramPackerDrops.Load()}
 	}))
+}
+
+// observeDequeue runs only for sampled slow dequeues on the send loop.
+func (h *datagramQueue) observeDequeue() *datagramTransportSample {
+	if h.slowTransportSample == nil {
+		return nil
+	}
+	sample := h.slowTransportSample()
+	sample.ConnectionID, sample.Reason = h.observationID, "dequeue"
+	h.lastSendObservation.Store(sample)
+	return sample
+}
+
+// DatagramSendObservation returns an immutable, last-observed snapshot. Its
+// timestamp can precede the caller's overload event; it is not current state.
+// Marshaling is paid only by the occasional diagnostic reader.
+func (s *connection) DatagramSendObservation() (uint64, string) {
+	if s.datagramQueue == nil {
+		return 0, ""
+	}
+	h := s.datagramQueue
+	sample := h.lastSendObservation.Load()
+	if sample == nil {
+		return h.observationID, ""
+	}
+	body, err := json.Marshal(sample)
+	if err != nil {
+		return h.observationID, ""
+	}
+	return h.observationID, string(body)
 }
