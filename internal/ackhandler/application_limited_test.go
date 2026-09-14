@@ -1,10 +1,10 @@
 package ackhandler
 
 import (
-	"github.com/olicesx/quic-go/internal/protocol"
 	"testing"
 
 	"github.com/olicesx/quic-go/congestion"
+	"github.com/olicesx/quic-go/internal/protocol"
 )
 
 type applicationSupplyCC struct {
