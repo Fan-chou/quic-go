@@ -980,7 +980,14 @@ func (h *sentPacketHandler) SetCongestionControl(cc congestionExt.CongestionCont
 
 // OnApplicationLimited is an optional send-loop hook, not an ACK-time guess.
 func (h *sentPacketHandler) OnApplicationLimited() {
-	if cc, ok := h.getCongestionControl().(interface{ SetApplicationLimited(bool) }); ok {
+	controller := h.getCongestionControl()
+	// Empty application queues do not prove that the application constrained
+	// delivery when the congestion window is already full. Read both values
+	// here on the send loop, where packet accounting is authoritative.
+	if h.bytesInFlight >= controller.GetCongestionWindow() {
+		return
+	}
+	if cc, ok := controller.(interface{ SetApplicationLimited(bool) }); ok {
 		cc.SetApplicationLimited(true)
 	}
 }
