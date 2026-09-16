@@ -190,7 +190,8 @@ type connection struct {
 	// pacingDeadline is the time when the next packet should be sent
 	pacingDeadline time.Time
 
-	peerParams *wire.TransportParameters
+	// Published by the handshake goroutine and read by application goroutines.
+	peerParams atomic.Pointer[wire.TransportParameters]
 
 	timer connectionTimer
 	// keepAlivePingSent stores whether a keep alive PING is in flight.
@@ -510,6 +511,19 @@ func (s *connection) preSetup() {
 	s.connState.Version = s.version
 }
 
+// abortAfterStartupFailure closes resources before the send queue has started.
+// Closing that queue here would wait forever for its Run method.
+func (s *connection) abortAfterStartupFailure(startupErr error) error {
+	s.cryptoStreamHandler.Close()
+	s.handleCloseError(&closeError{err: startupErr, immediate: true})
+	if s.tracer != nil && s.tracer.Close != nil {
+		s.tracer.Close()
+	}
+	s.logger.Infof("Connection %s closed.", s.logID)
+	s.timer.Stop()
+	return startupErr
+}
+
 // run the connection main loop
 func (s *connection) run() error {
 	var closeErr closeError
@@ -534,10 +548,12 @@ func (s *connection) run() error {
 	s.timer = *newTimer()
 
 	if err := s.cryptoStreamHandler.StartHandshake(s.ctx); err != nil {
-		return err
+		closeErr.err = err
+		return s.abortAfterStartupFailure(err)
 	}
 	if err := s.handleHandshakeEvents(time.Now()); err != nil {
-		return err
+		closeErr.err = err
+		return s.abortAfterStartupFailure(err)
 	}
 	go func() {
 		if err := s.sendQueue.Run(); err != nil {
@@ -703,7 +719,8 @@ func (s *connection) Context() context.Context {
 }
 
 func (s *connection) supportsDatagrams() bool {
-	return s.peerParams.MaxDatagramFrameSize > 0
+	params := s.peerParams.Load()
+	return params != nil && params.MaxDatagramFrameSize > 0
 }
 
 func (s *connection) ConnectionState() ConnectionState {
@@ -1764,7 +1781,7 @@ func (s *connection) restoreTransportParameters(params *wire.TransportParameters
 		s.logger.Debugf("Restoring Transport Parameters: %s", params)
 	}
 
-	s.peerParams = params
+	s.peerParams.Store(params)
 	s.connIDGenerator.SetMaxActiveConnIDs(params.ActiveConnectionIDLimit)
 	s.connFlowController.UpdateSendWindow(params.InitialMaxData)
 	s.streamsMap.UpdateLimits(params)
@@ -1784,14 +1801,14 @@ func (s *connection) handleTransportParameters(params *wire.TransportParameters)
 		}
 	}
 
-	if s.perspective == protocol.PerspectiveClient && s.peerParams != nil && s.ConnectionState().Used0RTT && !params.ValidForUpdate(s.peerParams) {
+	if s.perspective == protocol.PerspectiveClient && s.peerParams.Load() != nil && s.ConnectionState().Used0RTT && !params.ValidForUpdate(s.peerParams.Load()) {
 		return &qerr.TransportError{
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: "server sent reduced limits after accepting 0-RTT data",
 		}
 	}
 
-	s.peerParams = params
+	s.peerParams.Store(params)
 	// On the client side we have to wait for handshake completion.
 	// During a 0-RTT connection, we are only allowed to use the new transport parameters for 1-RTT packets.
 	if s.perspective == protocol.PerspectiveServer {
@@ -1838,7 +1855,7 @@ func (s *connection) checkTransportParameters(params *wire.TransportParameters) 
 }
 
 func (s *connection) applyTransportParameters() {
-	params := s.peerParams
+	params := s.peerParams.Load()
 	// Our local idle timeout will always be > 0.
 	s.idleTimeout = s.config.MaxIdleTimeout
 	// If the peer advertised an idle timeout, take the minimum of the values.
@@ -2388,12 +2405,13 @@ func (s *connection) OpenUniStreamSync(ctx context.Context) (SendStream, error) 
 }
 
 func (s *connection) newFlowController(id protocol.StreamID) flowcontrol.StreamFlowController {
-	initialSendWindow := s.peerParams.InitialMaxStreamDataUni
+	params := s.peerParams.Load()
+	initialSendWindow := params.InitialMaxStreamDataUni
 	if id.Type() == protocol.StreamTypeBidi {
 		if id.InitiatedBy() == s.perspective {
-			initialSendWindow = s.peerParams.InitialMaxStreamDataBidiRemote
+			initialSendWindow = params.InitialMaxStreamDataBidiRemote
 		} else {
-			initialSendWindow = s.peerParams.InitialMaxStreamDataBidiLocal
+			initialSendWindow = params.InitialMaxStreamDataBidiLocal
 		}
 	}
 	return flowcontrol.NewStreamFlowController(
@@ -2481,7 +2499,7 @@ func (s *connection) SendDatagramContext(ctx context.Context, p []byte) error {
 	// The payload size estimate is conservative.
 	// Under many circumstances we could send a few more bytes.
 	maxDataLen := min(
-		f.MaxDataLen(s.peerParams.MaxDatagramFrameSize, s.version),
+		f.MaxDataLen(s.peerParams.Load().MaxDatagramFrameSize, s.version),
 		protocol.ByteCount(s.maxPayloadSizeEstimate.Load()),
 	)
 	if protocol.ByteCount(len(p)) > maxDataLen {
