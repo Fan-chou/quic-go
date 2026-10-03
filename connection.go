@@ -2494,28 +2494,17 @@ func (s *connection) SendDatagramContext(ctx context.Context, p []byte) error {
 		return errors.New("datagram support disabled")
 	}
 
-	f := wire.GetDatagramFrame()
-	f.DataLenPresent = true
-	// The payload size estimate is conservative.
-	// Under many circumstances we could send a few more bytes.
+	// The queued packet and its tracer retain the frame after serialization.
+	// Send frames are independently owned; only receive frames use the pool.
+	f := &wire.DatagramFrame{DataLenPresent: true}
 	maxDataLen := min(
 		f.MaxDataLen(s.peerParams.Load().MaxDatagramFrameSize, s.version),
 		protocol.ByteCount(s.maxPayloadSizeEstimate.Load()),
 	)
 	if protocol.ByteCount(len(p)) > maxDataLen {
-		wire.PutDatagramFrame(f)
-		return &DatagramTooLargeError{
-			MaxDataLen: int64(maxDataLen),
-		}
+		return &DatagramTooLargeError{MaxDataLen: int64(maxDataLen)}
 	}
-	if protocol.ByteCount(cap(f.Data)) < protocol.ByteCount(len(p)) {
-		// Oversized datagram (larger than the pool cap): allocate fresh;
-		// PutDatagramFrame will skip pooling it back.
-		f.Data = make([]byte, len(p))
-	} else {
-		f.Data = f.Data[:len(p)]
-	}
-	copy(f.Data, p)
+	f.Data = append([]byte(nil), p...)
 	return s.datagramQueue.AddContext(ctx, f)
 }
 

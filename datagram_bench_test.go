@@ -12,11 +12,12 @@ import (
 // This is the steady-state UDP relay loop for hy2/tuic.
 func BenchmarkDatagramReceivePooled(b *testing.B) {
 	q := newDatagramQueue(nil, nil)
-	f := &wire.DatagramFrame{Data: make([]byte, 1200)}
+	defer q.CloseWithError(nil)
+	payload := make([]byte, 1200)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q.HandleDatagramFrame(f)
+		q.HandleDatagramFrame(&wire.DatagramFrame{Data: payload})
 		data, err := q.Receive(context.Background())
 		if err != nil {
 			b.Fatal(err)
@@ -29,15 +30,16 @@ func BenchmarkDatagramReceivePooled(b *testing.B) {
 // allocates a fresh buffer in HandleDatagramFrame (make) and never reuses it.
 func BenchmarkDatagramReceiveLegacy(b *testing.B) {
 	q := newDatagramQueue(nil, nil)
-	f := &wire.DatagramFrame{Data: make([]byte, 1200)}
+	defer q.CloseWithError(nil)
+	payload := make([]byte, 1200)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Pre-pool behavior: allocate + copy per frame
-		data := make([]byte, len(f.Data))
-		copy(data, f.Data)
+		data := make([]byte, len(payload))
+		copy(data, payload)
 		q.rcvMx.Lock()
-		q.rcvQueue = append(q.rcvQueue, data)
+		q.rcvQueue.PushBack(data)
 		q.rcvMx.Unlock()
 		_, err := q.Receive(context.Background())
 		if err != nil {
@@ -50,11 +52,12 @@ func BenchmarkDatagramReceiveLegacy(b *testing.B) {
 // channel notification, closer to real line-rate behavior.
 func BenchmarkDatagramRoundTripPooled(b *testing.B) {
 	q := newDatagramQueue(nil, nil)
-	f := &wire.DatagramFrame{Data: make([]byte, 1200)}
+	defer q.CloseWithError(nil)
+	payload := make([]byte, 1200)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q.HandleDatagramFrame(f)
+		q.HandleDatagramFrame(&wire.DatagramFrame{Data: payload})
 		data, _ := q.Receive(context.Background())
 		q.ReleaseDatagram(data)
 	}

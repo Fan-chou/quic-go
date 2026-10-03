@@ -112,14 +112,8 @@ type datagramQueue struct {
 	sent      chan struct{} // used to notify Add that a datagram was dequeued
 
 	rcvMx    sync.Mutex
-	rcvQueue [][]byte
-	// rcvHead indexes the next unconsumed entry in rcvQueue. Consuming by
-	// index instead of re-slicing keeps the pre-allocated backing array
-	// usable: [1:] would monotonically shrink the appendable window until a
-	// reallocation copies the whole queue, and the queue is compacted back
-	// to rcvQueue[:0] every time it drains empty.
-	rcvHead int
-	rcvd    chan struct{} // used to notify Receive that a new datagram was received
+	rcvQueue ringbuffer.RingBuffer[[]byte]
+	rcvd     chan struct{} // used to notify Receive when a datagram arrives
 
 	closeErr error
 	closed   chan struct{}
@@ -135,17 +129,16 @@ type datagramQueue struct {
 }
 
 func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
-	return &datagramQueue{
+	q := &datagramQueue{
 		hasData:       hasData,
 		observationID: datagramObservationIDs.Add(1),
 		rcvd:          make(chan struct{}, 1),
 		sent:          make(chan struct{}, 1),
 		closed:        make(chan struct{}),
 		logger:        logger,
-		// Pre-allocate the receive queue so steady-state enqueue never
-		// triggers slice growth allocations.
-		rcvQueue: make([][]byte, 0, maxDatagramRcvQueueLen),
 	}
+	q.rcvQueue.Init(maxDatagramRcvQueueLen)
+	return q
 }
 
 // Add queues a new DATAGRAM frame for sending.
@@ -176,13 +169,11 @@ func (h *datagramQueue) AddContext(ctx context.Context, f *wire.DatagramFrame) e
 	for {
 		if err := context.Cause(ctx); err != nil {
 			h.sendMx.Unlock()
-			wire.PutDatagramFrame(f)
 			return err
 		}
 		select {
 		case <-h.closed:
 			h.sendMx.Unlock()
-			wire.PutDatagramFrame(f)
 			return h.closeErr
 		default:
 		}
@@ -204,18 +195,15 @@ func (h *datagramQueue) AddContext(ctx context.Context, f *wire.DatagramFrame) e
 		select {
 		case <-h.closed:
 			// Connection closed while blocked on a full queue: the frame
-			// was never sent, return it to the pool.
-			wire.PutDatagramFrame(f)
+			// was never sent and is reclaimed with the queue owner.
 			return h.closeErr
 		case <-ctx.Done():
-			wire.PutDatagramFrame(f)
 			return context.Cause(ctx)
 		case <-h.sent:
 		case <-timer.C:
 			// Queue stayed full for the whole timeout: the transport is
 			// stalled, not merely backpressured. Drop this datagram and
 			// surface a bounded error instead of parking forever.
-			wire.PutDatagramFrame(f)
 			return ErrDatagramQueueFullTimeout
 		}
 		h.sendMx.Lock()
@@ -260,14 +248,8 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 	wire.PutDatagramFrame(f)
 	var queued bool
 	h.rcvMx.Lock()
-	if len(h.rcvQueue)-h.rcvHead < maxDatagramRcvQueueLen {
-		// Compact once the queue fully drains so the pre-allocated backing
-		// array stays usable without ever copying live entries.
-		if h.rcvHead > 0 && h.rcvHead == len(h.rcvQueue) {
-			h.rcvQueue = h.rcvQueue[:0]
-			h.rcvHead = 0
-		}
-		h.rcvQueue = append(h.rcvQueue, buf)
+	if h.rcvQueue.Len() < maxDatagramRcvQueueLen {
+		h.rcvQueue.PushBack(buf)
 		queued = true
 		select {
 		case h.rcvd <- struct{}{}:
@@ -308,9 +290,8 @@ func (h *datagramQueue) ReleaseDatagram(data []byte) {
 func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 	for {
 		h.rcvMx.Lock()
-		if h.rcvHead < len(h.rcvQueue) {
-			data := h.rcvQueue[h.rcvHead]
-			h.rcvHead++
+		if !h.rcvQueue.Empty() {
+			data := h.rcvQueue.PopFront()
 			h.rcvMx.Unlock()
 			return data, nil
 		}
@@ -329,19 +310,15 @@ func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 func (h *datagramQueue) CloseWithError(e error) {
 	h.closeErr = e
 	close(h.closed)
-	// Drain queued frames/buffers so they return to their pools. Packer
+	// Release send frames and return unread receive buffers to their pool. Packer
 	// and ReceiveDatagram stop after the connection run loop exits, so
 	// leftover entries would otherwise sit until GC.
 	h.sendMx.Lock()
-	for !h.sendQueue.Empty() {
-		wire.PutDatagramFrame(h.sendQueue.PopFront().frame)
-	}
+	h.sendQueue.Clear()
 	h.sendMx.Unlock()
 	h.rcvMx.Lock()
-	for _, buf := range h.rcvQueue[h.rcvHead:] {
-		datagramBufPool.Put(buf)
+	for !h.rcvQueue.Empty() {
+		datagramBufPool.Put(h.rcvQueue.PopFront())
 	}
-	h.rcvQueue = h.rcvQueue[:0]
-	h.rcvHead = 0
 	h.rcvMx.Unlock()
 }
