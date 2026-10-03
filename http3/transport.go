@@ -49,16 +49,21 @@ type roundTripperWithCount struct {
 	conn       quic.EarlyConnection
 	clientConn clientConn
 
-	useCount atomic.Int64
+	useCount  atomic.Int64
+	retired   bool // guarded by Transport.mutex
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (r *roundTripperWithCount) Close() error {
-	r.cancel()
-	<-r.dialing
-	if r.conn != nil {
-		return r.conn.CloseWithError(0, "")
-	}
-	return nil
+	r.closeOnce.Do(func() {
+		r.cancel()
+		<-r.dialing
+		if r.conn != nil {
+			r.closeErr = r.conn.CloseWithError(0, "")
+		}
+	})
+	return r.closeErr
 }
 
 // Transport implements the http.RoundTripper interface
@@ -102,7 +107,8 @@ type Transport struct {
 
 	Logger *slog.Logger
 
-	mutex sync.Mutex
+	mutex     sync.Mutex
+	dialMutex sync.Mutex // protects the shared default QUIC transport
 
 	initOnce sync.Once
 	initErr  error
@@ -110,6 +116,7 @@ type Transport struct {
 	newClientConn func(quic.EarlyConnection) clientConn
 
 	clients   map[string]*roundTripperWithCount
+	retired   map[*roundTripperWithCount]struct{}
 	transport *quic.Transport
 }
 
@@ -206,7 +213,14 @@ func (t *Transport) roundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 	return t.doRoundTripOpt(req, opt, false)
 }
 
-func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetried bool) (*http.Response, error) {
+func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetried bool) (_ *http.Response, resultErr error) {
+	// The outer call owns the original body; this attempt owns a GetBody copy,
+	// including failures before a client or stream exists to close it.
+	defer func() {
+		if isRetried && resultErr != nil && req.Body != nil {
+			_ = req.Body.Close()
+		}
+	}()
 	trace := httptrace.ContextClientTrace(req.Context())
 	hostname := authorityAddr(hostnameFromURL(req.URL))
 	traceGetConn(trace, hostname)
@@ -214,6 +228,12 @@ func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetrie
 	if err != nil {
 		return nil, err
 	}
+	release := true
+	defer func() {
+		if release {
+			t.releaseClient(cl)
+		}
+	}()
 
 	select {
 	case <-cl.dialing:
@@ -222,11 +242,10 @@ func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetrie
 	}
 
 	if cl.dialErr != nil {
-		t.removeClient(hostname)
+		t.retireClient(hostname, cl)
 		return nil, cl.dialErr
 	}
 	traceGotConn(trace, cl.conn, isReused)
-	defer cl.useCount.Add(-1)
 	rsp, err := cl.clientConn.RoundTrip(req)
 	if err != nil {
 		// request aborted due to context cancellation
@@ -236,18 +255,48 @@ func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetrie
 		default:
 		}
 
+		var unusable *errConnUnusable
+		unusableConn := errors.As(err, &unusable) || cl.conn.Context().Err() != nil
 		if isRetried {
+			if unusableConn {
+				t.retireClient(hostname, cl)
+			}
 			return nil, err
 		}
-
-		t.removeClient(hostname)
-		req, err = canRetryRequest(err, req)
-		if err != nil {
-			return nil, err
+		retryReq, retryErr := canRetryRequest(err, req)
+		if unusableConn || retryErr == nil {
+			t.retireClient(hostname, cl)
 		}
-		return t.doRoundTripOpt(req, opt, true)
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		return t.doRoundTripOpt(retryReq, opt, true)
+	}
+	if rsp != nil && rsp.Body != nil && rsp.Body != http.NoBody {
+		rsp.Body = &trackedResponseBody{ReadCloser: rsp.Body, release: func() { t.releaseClient(cl) }}
+		release = false
 	}
 	return rsp, nil
+}
+
+type trackedResponseBody struct {
+	io.ReadCloser
+	once    sync.Once
+	release func()
+}
+
+func (b *trackedResponseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.once.Do(b.release)
+	}
+	return n, err
+}
+
+func (b *trackedResponseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.release)
+	return err
 }
 
 func canRetryRequest(err error, req *http.Request) (*http.Request, error) {
@@ -354,9 +403,11 @@ func (t *Transport) dial(ctx context.Context, hostname string) (quic.EarlyConnec
 
 	dial := t.Dial
 	if dial == nil {
+		t.dialMutex.Lock()
 		if t.transport == nil {
 			udpConn, err := net.ListenUDP("udp", nil)
 			if err != nil {
+				t.dialMutex.Unlock()
 				return nil, nil, err
 			}
 			t.transport = &quic.Transport{
@@ -364,6 +415,8 @@ func (t *Transport) dial(ctx context.Context, hostname string) (quic.EarlyConnec
 				DisableAddrParsing: true,
 			}
 		}
+		transport := t.transport
+		t.dialMutex.Unlock()
 		dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			network := "udp"
 			udpAddr, err := t.resolveUDPAddr(ctx, network, addr)
@@ -373,7 +426,7 @@ func (t *Transport) dial(ctx context.Context, hostname string) (quic.EarlyConnec
 			trace := httptrace.ContextClientTrace(ctx)
 			traceConnectStart(trace, network, udpAddr.String())
 			traceTLSHandshakeStart(trace)
-			conn, err := t.transport.DialEarly(ctx, udpAddr, tlsCfg, cfg)
+			conn, err := transport.DialEarly(ctx, udpAddr, tlsCfg, cfg)
 			var state tls.ConnectionState
 			if conn != nil {
 				state = conn.ConnectionState().TLS
@@ -409,13 +462,29 @@ func (t *Transport) resolveUDPAddr(ctx context.Context, network, addr string) (*
 	return &net.UDPAddr{IP: ip.IP, Port: port, Zone: ip.Zone}, nil
 }
 
-func (t *Transport) removeClient(hostname string) {
+func (t *Transport) retireClient(hostname string, cl *roundTripperWithCount) {
 	t.mutex.Lock()
-	defer t.mutex.Unlock()
-	if t.clients == nil {
-		return
+	if t.clients[hostname] == cl {
+		delete(t.clients, hostname)
 	}
-	delete(t.clients, hostname)
+	cl.retired = true
+	if t.retired == nil {
+		t.retired = make(map[*roundTripperWithCount]struct{})
+	}
+	t.retired[cl] = struct{}{}
+	t.mutex.Unlock()
+}
+
+func (t *Transport) releaseClient(cl *roundTripperWithCount) {
+	t.mutex.Lock()
+	closeConn := cl.useCount.Add(-1) == 0 && cl.retired
+	if closeConn {
+		delete(t.retired, cl)
+	}
+	t.mutex.Unlock()
+	if closeConn {
+		_ = cl.Close()
+	}
 }
 
 // NewClientConn creates a new HTTP/3 client connection on top of a QUIC connection.
@@ -441,22 +510,26 @@ func (t *Transport) NewClientConn(conn quic.Connection) *ClientConn {
 func (t *Transport) Close() error {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
+	all := make(map[*roundTripperWithCount]struct{}, len(t.clients)+len(t.retired))
 	for _, cl := range t.clients {
-		if err := cl.Close(); err != nil {
-			return err
-		}
+		all[cl] = struct{}{}
+	}
+	for cl := range t.retired {
+		all[cl] = struct{}{}
 	}
 	t.clients = nil
+	t.retired = nil
+	var errs []error
+	for cl := range all {
+		errs = append(errs, cl.Close())
+	}
+	t.dialMutex.Lock()
+	defer t.dialMutex.Unlock()
 	if t.transport != nil {
-		if err := t.transport.Close(); err != nil {
-			return err
-		}
-		if err := t.transport.Conn.Close(); err != nil {
-			return err
-		}
+		errs = append(errs, t.transport.Close(), t.transport.Conn.Close())
 		t.transport = nil
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func validMethod(method string) bool {

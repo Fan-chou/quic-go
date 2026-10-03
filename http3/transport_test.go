@@ -319,6 +319,10 @@ func testTransportConnectionRedial(t *testing.T, req *http.Request, roundtripErr
 	handshakeChan := make(chan struct{})
 	close(handshakeChan)
 	conn.EXPECT().HandshakeComplete().Return(handshakeChan).AnyTimes()
+	conn.EXPECT().Context().Return(context.Background()).AnyTimes()
+	if expectRedial {
+		conn.EXPECT().CloseWithError(quic.ApplicationErrorCode(0), "").Times(1)
+	}
 	var dialCount int
 	tr := &Transport{
 		Dial: func(context.Context, string, *tls.Config, *quic.Config) (quic.EarlyConnection, error) {
@@ -360,6 +364,7 @@ func TestTransportConnectionRedialRetriesOnlyOnce(t *testing.T) {
 	handshakeChan := make(chan struct{})
 	close(handshakeChan)
 	conn.EXPECT().HandshakeComplete().Return(handshakeChan).AnyTimes()
+	conn.EXPECT().CloseWithError(quic.ApplicationErrorCode(0), "").Times(2)
 	var dialCount int
 	tr := &Transport{
 		Dial: func(context.Context, string, *tls.Config, *quic.Config) (quic.EarlyConnection, error) {
