@@ -17,7 +17,9 @@ func BenchmarkDatagramReceivePooled(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q.HandleDatagramFrame(&wire.DatagramFrame{Data: payload})
+		frame := wire.GetDatagramFrame()
+		frame.Data = append(frame.Data[:0], payload...)
+		q.HandleDatagramFrame(frame)
 		data, err := q.Receive(context.Background())
 		if err != nil {
 			b.Fatal(err)
@@ -57,7 +59,9 @@ func BenchmarkDatagramRoundTripPooled(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		q.HandleDatagramFrame(&wire.DatagramFrame{Data: payload})
+		frame := wire.GetDatagramFrame()
+		frame.Data = append(frame.Data[:0], payload...)
+		q.HandleDatagramFrame(frame)
 		data, _ := q.Receive(context.Background())
 		q.ReleaseDatagram(data)
 	}
