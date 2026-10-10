@@ -150,6 +150,27 @@ func TestReceiveStreamReleasesPooledFrameWhenCancelled(t *testing.T) {
 	require.False(t, f.Pooled(), "frame on a cancelled stream must be returned to the pool")
 }
 
+// TestReceiveStreamReleasesPooledFrameWhenCancelledRemotely verifies the same
+// for frames arriving after a RESET_STREAM from the peer: readImpl reports
+// the reset error before it ever dequeues, so such frames must be returned to
+// the pool instead of being stranded in the frame sorter until teardown
+// (memory pinned up to the receive window, pooled frame lost from
+// circulation).
+func TestReceiveStreamReleasesPooledFrameWhenCancelledRemotely(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockFC := mocks.NewMockStreamFlowController(mockCtrl)
+	str := newReceiveStream(42, nil, mockFC)
+	mockFC.EXPECT().UpdateHighestReceived(protocol.ByteCount(0x10), true, gomock.Any())
+	mockFC.EXPECT().Abandon()
+	require.NoError(t, str.handleResetStreamFrameImpl(&wire.ResetStreamFrame{ErrorCode: 7, FinalSize: 0x10}, time.Now()))
+
+	f := wire.GetStreamFrame()
+	f.Data = f.Data[:4]
+	require.True(t, f.Pooled())
+	mockFC.EXPECT().UpdateHighestReceived(gomock.Any(), false, gomock.Any())
+	require.NoError(t, str.handleStreamFrame(f, time.Now()))
+	require.False(t, f.Pooled(), "frame after a remote RESET must be returned to the pool")
+}
 func TestReceiveStreamReadOverlappingData(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockFC := mocks.NewMockStreamFlowController(mockCtrl)

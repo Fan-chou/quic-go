@@ -325,7 +325,10 @@ func (s *receiveStream) handleStreamFrameImpl(frame *wire.StreamFrame, now time.
 	if frame.Fin {
 		s.finalOffset = maxOffset
 	}
-	if s.cancelledLocally {
+	if s.cancelledLocally || s.cancelledRemotely {
+		// readImpl reports cancelErr before it ever dequeues, so a frame queued
+		// after either cancel would sit in the sorter until teardown. Flow
+		// control accounting has already run; only the pooled frame is owed back.
 		frame.PutBack()
 		return nil
 	}
