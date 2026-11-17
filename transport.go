@@ -136,9 +136,11 @@ type Transport struct {
 
 	handlerMap packetHandlerManager
 
-	mutex    sync.Mutex
-	initOnce sync.Once
-	initErr  error
+	mutex        sync.Mutex
+	initOnce     sync.Once
+	initErr      error
+	closeOnce    sync.Once
+	closeOnceErr error
 
 	// Set in init.
 	// If no ConnectionIDGenerator is set, this is the ConnectionIDLength.
@@ -250,15 +252,21 @@ func (t *Transport) DialEarly(ctx context.Context, addr net.Addr, tlsConf *tls.C
 
 func (t *Transport) dial(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config, use0RTT bool) (EarlyConnection, error) {
 	if err := t.init(t.isSingleUse); err != nil {
+		if t.isSingleUse {
+			_ = t.Close()
+		}
 		return nil, err
 	}
 	if err := validateConfig(conf); err != nil {
+		if t.isSingleUse {
+			_ = t.Close()
+		}
 		return nil, err
 	}
 	conf = populateConfig(conf)
 	tlsConf = tlsConf.Clone()
 	setTLSConfigServerName(tlsConf, addr, host)
-	return t.doDial(ctx,
+	conn, err := t.doDial(ctx,
 		newSendConn(t.conn, addr, packetInfo{}, utils.DefaultLogger),
 		tlsConf,
 		conf,
@@ -267,6 +275,10 @@ func (t *Transport) dial(ctx context.Context, addr net.Addr, host string, tlsCon
 		use0RTT,
 		conf.Versions[0],
 	)
+	if err != nil && t.isSingleUse {
+		_ = t.Close()
+	}
+	return conn, err
 }
 
 func (t *Transport) doDial(
@@ -332,15 +344,20 @@ func (t *Transport) doDial(
 	// after doDial returns (if the handshake is successful).
 	errChan := make(chan error, 1)
 	recreateChan := make(chan errCloseForRecreating)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
 		err := conn.run()
 		var recreateErr *errCloseForRecreating
 		if errors.As(err, &recreateErr) {
-			recreateChan <- *recreateErr
-			return
+			select {
+			case recreateChan <- *recreateErr:
+				return
+			case <-done:
+			}
 		}
 		if t.isSingleUse {
-			t.Close()
+			_ = t.Close()
 		}
 		errChan <- err
 	}()
@@ -401,7 +418,6 @@ func (t *Transport) init(allowZeroLengthConnIDs bool) error {
 		if t.handlerMap == nil { // allows mocking the handlerMap in tests
 			t.handlerMap = newPacketHandlerMap(t.enqueueClosePacket, t.logger)
 		}
-		t.listening = make(chan struct{})
 
 		t.closeQueue = make(chan closePacket, 4)
 		t.statelessResetQueue = make(chan receivedPacket, 4)
@@ -433,6 +449,7 @@ func (t *Transport) init(allowZeroLengthConnIDs bool) error {
 		if !t.skipAddrParsing && !t.DisableAddrParsing {
 			enableAddrParsing(conn)
 		}
+		t.listening = make(chan struct{})
 		go t.listen(conn)
 		go t.runSendQueue()
 	})
@@ -474,21 +491,28 @@ func (t *Transport) runSendQueue() {
 // It is invalid to start new listeners or connections after that.
 func (t *Transport) Close() error {
 	// avoid race condition if the transport is currently being initialized
-	t.init(false)
+	t.init(t.isSingleUse)
 
 	t.close(nil)
-	if t.createdConn {
-		if err := t.Conn.Close(); err != nil {
-			return err
+	t.closeOnce.Do(func() {
+		if t.createdConn {
+			if err := t.Conn.Close(); err != nil {
+				t.closeOnceErr = err
+				return
+			}
+		} else if t.conn != nil && t.listening != nil {
+			select {
+			case <-t.listening:
+			default:
+				t.conn.SetReadDeadline(time.Now())
+				defer func() { t.conn.SetReadDeadline(time.Time{}) }()
+			}
 		}
-	} else if t.conn != nil {
-		t.conn.SetReadDeadline(time.Now())
-		defer func() { t.conn.SetReadDeadline(time.Time{}) }()
-	}
-	if t.listening != nil {
-		<-t.listening // wait until listening returns
-	}
-	return nil
+		if t.listening != nil {
+			<-t.listening // wait until listening returns
+		}
+	})
+	return t.closeOnceErr
 }
 
 func (t *Transport) closeServer() {

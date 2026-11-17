@@ -65,7 +65,7 @@ func DialAddrEarly(ctx context.Context, addr string, tlsConf *tls.Config, conf *
 	}
 	conn, err := tr.dial(ctx, udpAddr, addr, tlsConf, conf, true)
 	if err != nil {
-		tr.Close()
+		_ = tr.Close()
 		return nil, err
 	}
 	return conn, nil
@@ -80,7 +80,7 @@ func DialEarly(ctx context.Context, c net.PacketConn, addr net.Addr, tlsConf *tl
 	}
 	conn, err := dl.DialEarly(ctx, addr, tlsConf, conf)
 	if err != nil {
-		dl.Close()
+		_ = dl.Close()
 		return nil, err
 	}
 	return conn, nil
@@ -102,7 +102,7 @@ func Dial(ctx context.Context, c net.PacketConn, addr net.Addr, tlsConf *tls.Con
 	}
 	conn, err := dl.Dial(ctx, addr, tlsConf, conf)
 	if err != nil {
-		dl.Close()
+		_ = dl.Close()
 		return nil, err
 	}
 	return conn, nil
