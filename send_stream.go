@@ -53,6 +53,7 @@ type sendStream struct {
 	completed           bool // set when this stream has been reported to the streamSender as completed
 
 	dataForWriting []byte // during a Write() call, this slice is the part of p that still needs to be sent out
+	bytesWritten   int    // bytes of dataForWriting consumed by the active Write() call
 	nextFrame      *wire.StreamFrame
 
 	writeChan chan struct{}
@@ -124,15 +125,18 @@ func (s *sendStream) write(p []byte) (bool /* is newly completed */, int, error)
 	}
 
 	s.dataForWriting = p
+	s.bytesWritten = 0
 
 	var (
 		deadlineTimer  *utils.Timer
-		bytesWritten   int
 		notifiedSender bool
 	)
 	for {
 		var copied bool
 		var deadline time.Time
+		if s.finalError != nil {
+			break
+		}
 		// As soon as dataForWriting becomes smaller than a certain size x, we copy all the data to a STREAM frame (s.nextFrame),
 		// which can then be popped the next time we assemble a packet.
 		// This allows us to return Write() when all data but x bytes have been sent out.
@@ -152,16 +156,15 @@ func (s *sendStream) write(p []byte) (bool /* is newly completed */, int, error)
 				s.nextFrame.Data = s.nextFrame.Data[:l+len(s.dataForWriting)]
 				copy(s.nextFrame.Data[l:], s.dataForWriting)
 			}
+			s.bytesWritten += len(s.dataForWriting)
 			s.dataForWriting = nil
-			bytesWritten = len(p)
 			copied = true
 		} else {
-			bytesWritten = len(p) - len(s.dataForWriting)
 			deadline = s.deadline
 			if !deadline.IsZero() {
 				if !time.Now().Before(deadline) {
 					s.dataForWriting = nil
-					return false, bytesWritten, errDeadline
+					return false, s.bytesWritten, errDeadline
 				}
 				if deadlineTimer == nil {
 					deadlineTimer = utils.NewTimer()
@@ -169,7 +172,7 @@ func (s *sendStream) write(p []byte) (bool /* is newly completed */, int, error)
 				}
 				deadlineTimer.Reset(deadline)
 			}
-			if s.dataForWriting == nil || s.finalError != nil {
+			if s.dataForWriting == nil {
 				break
 			}
 		}
@@ -195,16 +198,17 @@ func (s *sendStream) write(p []byte) (bool /* is newly completed */, int, error)
 		s.mutex.Lock()
 	}
 
-	if bytesWritten == len(p) {
-		return false, bytesWritten, nil
-	}
 	if s.finalError != nil {
 		if s.cancelled {
 			s.cancellationFlagged = true
 		}
-		return s.isNewlyCompleted(), bytesWritten, s.finalError
+		completed := s.isNewlyCompleted()
+		if s.bytesWritten == len(p) {
+			return completed, s.bytesWritten, nil
+		}
+		return completed, s.bytesWritten, s.finalError
 	}
-	return false, bytesWritten, nil
+	return false, s.bytesWritten, nil
 }
 
 func (s *sendStream) canBufferStreamFrame() bool {
@@ -358,12 +362,14 @@ func (s *sendStream) getDataForWriting(f *wire.StreamFrame, maxBytes protocol.By
 	if protocol.ByteCount(len(s.dataForWriting)) <= maxBytes {
 		f.Data = f.Data[:len(s.dataForWriting)]
 		copy(f.Data, s.dataForWriting)
+		s.bytesWritten += len(s.dataForWriting)
 		s.dataForWriting = nil
 		s.signalWrite()
 		return
 	}
 	f.Data = f.Data[:maxBytes]
 	copy(f.Data, s.dataForWriting)
+	s.bytesWritten += int(maxBytes)
 	s.dataForWriting = s.dataForWriting[maxBytes:]
 	if s.canBufferStreamFrame() {
 		s.signalWrite()
@@ -470,6 +476,7 @@ func (s *sendStream) cancelWrite(errorCode qerr.StreamErrorCode, remote bool) {
 	s.ctxCancel(s.finalError)
 	s.numOutstandingFrames = 0
 	s.returnFramesToPool()
+	s.dataForWriting = nil
 	s.queuedResetStreamFrame = &wire.ResetStreamFrame{
 		StreamID:  s.streamID,
 		FinalSize: s.writeOffset,
@@ -541,6 +548,7 @@ func (s *sendStream) closeForShutdown(err error) {
 	// double-put. Leave numOutstandingFrames alone: OnAcked/OnLost skip the
 	// counter after shutdown so an ACK cannot panic on a zeroed count.
 	s.returnFramesToPool()
+	s.dataForWriting = nil
 	s.closedForShutdown = true
 	s.mutex.Unlock()
 	s.signalWrite()

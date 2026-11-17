@@ -1080,3 +1080,222 @@ func TestSendStreamCloseForShutdownReturnsQueuedFrames(t *testing.T) {
 	})
 	require.Empty(t, str.retransmissionQueue, "OnLost after shutdown must Put, not requeue")
 }
+
+func TestSendStreamBlockedWriteResetDoesNotLeakStream(t *testing.T) {
+	t.Run("STOP_SENDING while blocked with small remaining payload", func(t *testing.T) {
+		const streamID protocol.StreamID = 2001
+		for range 50 {
+			mockCtrl := gomock.NewController(t)
+			mockFC := mocks.NewMockStreamFlowController(mockCtrl)
+			mockSender := NewMockStreamSender(mockCtrl)
+			str := newSendStream(context.Background(), streamID, mockSender, mockFC)
+
+			wrote := make(chan struct{}, 2)
+			mockSender.EXPECT().onHasStreamData(streamID, str).Do(func(protocol.StreamID, sendStreamI) {
+				select {
+				case wrote <- struct{}{}:
+				default:
+				}
+			}).MaxTimes(2)
+			mockFC.EXPECT().SendWindowSize().Return(protocol.MaxByteCount).AnyTimes()
+			mockFC.EXPECT().AddBytesSent(gomock.Any()).AnyTimes()
+			mockSender.EXPECT().onHasStreamControlFrame(streamID, str)
+
+			completed := make(chan struct{}, 1)
+			mockSender.EXPECT().onStreamCompleted(streamID).Do(func(protocol.StreamID) {
+				completed <- struct{}{}
+			})
+
+			// Large write blocks; popping 1000 bytes leaves 1000 <= MaxPacketBufferSize.
+			data := make([]byte, 2000)
+			type writeRes struct {
+				n   int
+				err error
+			}
+			resCh := make(chan writeRes, 1)
+			go func() {
+				n, err := str.Write(data)
+				resCh <- writeRes{n: n, err: err}
+			}()
+			<-wrote
+
+			f, _, _ := str.popStreamFrame(1000+expectedFrameHeaderLen(streamID, 0), protocol.Version1)
+			require.NotNil(t, f.Frame)
+			f.Frame.PutBack()
+
+			str.handleStopSendingFrame(&wire.StopSendingFrame{StreamID: streamID, ErrorCode: 42})
+			cf, ok, _ := str.getControlFrame(time.Now())
+			require.True(t, ok)
+			cf.Handler.OnAcked(cf.Frame)
+
+			res := <-resCh
+			if res.err != nil {
+				require.ErrorIs(t, res.err, &StreamError{StreamID: streamID, ErrorCode: 42, Remote: true})
+			} else {
+				require.Equal(t, len(data), res.n)
+				_, err := str.Write([]byte{1})
+				require.ErrorIs(t, err, &StreamError{StreamID: streamID, ErrorCode: 42, Remote: true})
+			}
+			select {
+			case <-completed:
+			case <-time.After(time.Second):
+				t.Fatal("onStreamCompleted not called: stream leaked")
+			}
+			str.mutex.Lock()
+			require.Nil(t, str.dataForWriting)
+			require.Nil(t, str.nextFrame)
+			str.mutex.Unlock()
+			require.False(t, str.hasData())
+			mockCtrl.Finish()
+		}
+	})
+
+	t.Run("CancelWrite and closeForShutdown clear dataForWriting and preserve partial n", func(t *testing.T) {
+		for _, shutdown := range []bool{false, true} {
+			const streamID protocol.StreamID = 2002
+			mockCtrl := gomock.NewController(t)
+			mockFC := mocks.NewMockStreamFlowController(mockCtrl)
+			mockSender := NewMockStreamSender(mockCtrl)
+			str := newSendStream(context.Background(), streamID, mockSender, mockFC)
+
+			wrote := make(chan struct{})
+			mockSender.EXPECT().onHasStreamData(streamID, str).Do(func(protocol.StreamID, sendStreamI) { close(wrote) })
+			mockFC.EXPECT().SendWindowSize().Return(protocol.MaxByteCount)
+			mockFC.EXPECT().AddBytesSent(protocol.ByteCount(60))
+			if !shutdown {
+				mockSender.EXPECT().onHasStreamControlFrame(streamID, str)
+				mockSender.EXPECT().onStreamCompleted(streamID)
+			}
+
+			type writeRes struct {
+				n   int
+				err error
+			}
+			resCh := make(chan writeRes, 1)
+			go func() {
+				// 4000 bytes: after popping 60 bytes (< 64 for 1-byte DataLen varint),
+				// 3940 > MaxPacketBufferSize remains, so Write stays blocked on writeChan.
+				n, err := str.Write(make([]byte, 4000))
+				resCh <- writeRes{n: n, err: err}
+			}()
+			<-wrote
+
+			f, _, _ := str.popStreamFrame(60+expectedFrameHeaderLen(streamID, 0), protocol.Version1)
+			require.NotNil(t, f.Frame)
+			require.Equal(t, protocol.ByteCount(60), f.Frame.DataLen())
+			f.Frame.PutBack()
+
+			shutdownErr := errors.New("shutdown")
+			if shutdown {
+				str.closeForShutdown(shutdownErr)
+			} else {
+				str.CancelWrite(99)
+			}
+			res := <-resCh
+			require.Equal(t, 60, res.n)
+			if shutdown {
+				require.ErrorIs(t, res.err, shutdownErr)
+			} else {
+				require.ErrorIs(t, res.err, &StreamError{StreamID: streamID, ErrorCode: 99, Remote: false})
+				cf, ok, _ := str.getControlFrame(time.Now())
+				require.True(t, ok)
+				cf.Handler.OnAcked(cf.Frame)
+			}
+			str.mutex.Lock()
+			require.Nil(t, str.dataForWriting)
+			require.Nil(t, str.nextFrame)
+			str.mutex.Unlock()
+			require.False(t, str.hasData())
+			mockCtrl.Finish()
+		}
+	})
+
+	t.Run("STOP_SENDING during onHasStreamData after buffering full write", func(t *testing.T) {
+		const streamID protocol.StreamID = 2003
+		mockCtrl := gomock.NewController(t)
+		mockFC := mocks.NewMockStreamFlowController(mockCtrl)
+		mockSender := NewMockStreamSender(mockCtrl)
+		str := newSendStream(context.Background(), streamID, mockSender, mockFC)
+
+		completed := make(chan struct{}, 1)
+		mockSender.EXPECT().onHasStreamControlFrame(streamID, str)
+		mockSender.EXPECT().onStreamCompleted(streamID).Do(func(protocol.StreamID) {
+			completed <- struct{}{}
+		})
+		mockSender.EXPECT().onHasStreamData(streamID, str).Do(func(protocol.StreamID, sendStreamI) {
+			// Simulate remote STOP_SENDING + RESET_STREAM ACK while Write holds
+			// no mutex during onHasStreamData.
+			str.handleStopSendingFrame(&wire.StopSendingFrame{StreamID: streamID, ErrorCode: 77})
+			cf, ok, _ := str.getControlFrame(time.Now())
+			require.True(t, ok)
+			cf.Handler.OnAcked(cf.Frame)
+		})
+
+		n, err := str.Write([]byte("hello"))
+		require.NoError(t, err)
+		require.Equal(t, 5, n)
+		select {
+		case <-completed:
+		default:
+			t.Fatal("onStreamCompleted not called after STOP_SENDING during Write")
+		}
+	})
+
+	t.Run("deterministic STOP_SENDING while blocked with dataForWriting <= MaxPacketBufferSize", func(t *testing.T) {
+		const streamID protocol.StreamID = 2004
+		mockCtrl := gomock.NewController(t)
+		mockFC := mocks.NewMockStreamFlowController(mockCtrl)
+		mockSender := NewMockStreamSender(mockCtrl)
+		str := newSendStream(context.Background(), streamID, mockSender, mockFC)
+
+		mockSender.EXPECT().onHasStreamData(streamID, str).AnyTimes()
+		mockSender.EXPECT().onHasStreamControlFrame(streamID, str)
+		completed := make(chan struct{}, 1)
+		mockSender.EXPECT().onStreamCompleted(streamID).Do(func(protocol.StreamID) {
+			completed <- struct{}{}
+		})
+
+		n, err := str.Write(make([]byte, 500))
+		require.NoError(t, err)
+		require.Equal(t, 500, n)
+
+		// 1252 <= MaxPacketBufferSize (1452), yet 500 + 1252 > MaxPacketBufferSize so Write blocks.
+		payload := make([]byte, protocol.MaxPacketBufferSize-200)
+		type writeRes struct {
+			n   int
+			err error
+		}
+		resCh := make(chan writeRes, 1)
+		go func() {
+			n, err := str.Write(payload)
+			resCh <- writeRes{n: n, err: err}
+		}()
+
+		require.Eventually(t, func() bool {
+			str.mutex.Lock()
+			defer str.mutex.Unlock()
+			return len(str.dataForWriting) == len(payload)
+		}, time.Second, time.Millisecond)
+
+		str.handleStopSendingFrame(&wire.StopSendingFrame{StreamID: streamID, ErrorCode: 42})
+		cf, ok, _ := str.getControlFrame(time.Now())
+		require.True(t, ok)
+		cf.Handler.OnAcked(cf.Frame)
+
+		res := <-resCh
+		require.ErrorIs(t, res.err, &StreamError{StreamID: streamID, ErrorCode: 42, Remote: true})
+		require.Zero(t, res.n)
+
+		select {
+		case <-completed:
+		case <-time.After(time.Second):
+			t.Fatal("onStreamCompleted not called: stream leaked")
+		}
+		str.mutex.Lock()
+		require.Nil(t, str.dataForWriting)
+		require.Nil(t, str.nextFrame)
+		str.mutex.Unlock()
+		require.False(t, str.hasData())
+		mockCtrl.Finish()
+	})
+}
