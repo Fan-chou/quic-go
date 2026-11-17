@@ -39,4 +39,7 @@ func isSendMsgSizeErr(err error) bool {
 	return errors.Is(err, unix.EMSGSIZE)
 }
 
-func isRecvMsgSizeErr(error) bool { return false }
+func isRecvMsgSizeErr(err error) bool {
+	// Receive paths on Linux surface asynchronous PMTUD/MTU errors via sk->sk_err.
+	return errors.Is(err, unix.EMSGSIZE)
+}

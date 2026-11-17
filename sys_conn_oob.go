@@ -187,24 +187,29 @@ var invalidCmsgOnceV4, invalidCmsgOnceV6 sync.Once
 func (c *oobConn) ReadPacket() (receivedPacket, error) {
 	if len(c.messages) == int(c.readPos) { // all messages read. Read the next batch of messages.
 		c.messages = c.messages[:batchSize]
-		// replace buffers data buffers up to the packet that has been consumed during the last ReadBatch call
-		for i := uint8(0); i < c.readPos; i++ {
-			buffer := getPacketBuffer()
-			buffer.Data = buffer.Data[:protocol.MaxPacketBufferSize]
-			c.buffers[i] = buffer
+		// Only allocate buffers for slots already handed out; failed ReadBatch
+		// calls (e.g. asynchronous EMSGSIZE) leave buffers intact for retry.
+		for i := 0; i < batchSize; i++ {
+			if c.buffers[i] == nil {
+				buffer := getPacketBuffer()
+				buffer.Data = buffer.Data[:protocol.MaxPacketBufferSize]
+				c.buffers[i] = buffer
+			}
 			c.messages[i].Buffers[0] = c.buffers[i].Data
 		}
-		c.readPos = 0
 
 		n, err := c.batchConn.ReadBatch(c.messages, 0)
 		if n == 0 || err != nil {
+			c.readPos = batchSize
 			return receivedPacket{}, err
 		}
+		c.readPos = 0
 		c.messages = c.messages[:n]
 	}
 
 	msg := c.messages[c.readPos]
 	buffer := c.buffers[c.readPos]
+	c.buffers[c.readPos] = nil
 	c.readPos++
 
 	data := msg.OOB[:msg.NN]
@@ -217,6 +222,7 @@ func (c *oobConn) ReadPacket() (receivedPacket, error) {
 	for len(data) > 0 {
 		hdr, body, remainder, err := unix.ParseOneSocketControlMessage(data)
 		if err != nil {
+			buffer.Release()
 			return receivedPacket{}, err
 		}
 		if hdr.Level == unix.IPPROTO_IP {

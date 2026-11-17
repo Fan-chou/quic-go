@@ -71,7 +71,9 @@ func isSendMsgSizeErr(err error) bool {
 	return errors.Is(err, unix.EMSGSIZE)
 }
 
-func isRecvMsgSizeErr(error) bool { return false }
+func isRecvMsgSizeErr(err error) bool {
+	return errors.Is(err, unix.EMSGSIZE)
+}
 
 func getMacOSVersion() (int, error) {
 	uname := &unix.Utsname{}
