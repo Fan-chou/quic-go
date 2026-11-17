@@ -329,3 +329,35 @@ func TestDatagramObservationIdentifiesConnection(t *testing.T) {
 	_, state = conn.DatagramSendObservation()
 	require.Contains(t, state, `"reason":"dequeue"`)
 }
+
+func TestDatagramQueueConcurrentAddWakeupHandoff(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	defer queue.CloseWithError(errors.New("done"))
+
+	for i := 0; i < maxDatagramSendQueueLen; i++ {
+		require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte{0}}))
+	}
+
+	errCh1 := make(chan error, 1)
+	errCh2 := make(chan error, 1)
+	go func() { errCh1 <- queue.Add(&wire.DatagramFrame{Data: []byte("w1")}) }()
+	go func() { errCh2 <- queue.Add(&wire.DatagramFrame{Data: []byte("w2")}) }()
+
+	// Wait until both writers are blocked on the full queue.
+	time.Sleep(scaleDuration(15 * time.Millisecond))
+
+	// Pop two entries back-to-back while the writers are sleeping; the buffered
+	// sent channel only holds a single notification, so the first woken writer
+	// must hand off the remaining capacity wakeup to the second writer.
+	queue.Pop()
+	queue.Pop()
+
+	for _, ch := range []chan error{errCh1, errCh2} {
+		select {
+		case err := <-ch:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("blocked AddContext missed wakeup after multiple Pops")
+		}
+	}
+}

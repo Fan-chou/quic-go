@@ -669,6 +669,9 @@ func (p *packetPacker) composeNextPacket(
 				// as it's unlikely that the available packet size will increase.
 				p.datagramQueue.Pop()
 				// Unpacked send frames are reclaimed after the queue releases them.
+				// Keep draining queued frames so a smaller datagram behind an
+				// oversized one is not stranded behind errNothingToPack.
+				continue
 			}
 			// If the DATAGRAM frame was too large and the packet contained an ACK, we'll try to send it out later.
 			// Likewise, a frame that doesn't fit after earlier DATAGRAMs

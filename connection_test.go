@@ -2938,3 +2938,64 @@ func TestConnectionRejectsDatagramFramesWithoutSupport(t *testing.T) {
 	require.Equal(t, uint64(0x30), transportErr.FrameType)
 	require.Equal(t, "received DATAGRAM frame without datagram support", transportErr.ErrorMessage)
 }
+
+func TestConnectionGSOBatchDoesNotTruncateNextPacketBelowMaxSize(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	sph := mockackhandler.NewMockSentPacketHandler(mockCtrl)
+	tc := newServerTestConnection(t,
+		mockCtrl,
+		nil,
+		true,
+		connectionOptHandshakeConfirmed(),
+		connectionOptSentPacketHandler(sph),
+	)
+
+	sph.EXPECT().SendMode(gomock.Any()).Return(ackhandler.SendAny).AnyTimes()
+	sph.EXPECT().TimeUntilSend().Return(time.Time{}).AnyTimes()
+	sph.EXPECT().SentPacket(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+	sph.EXPECT().GetLossDetectionTimeout().Return(time.Time{}).AnyTimes()
+	sph.EXPECT().ECNMode(gomock.Any()).Return(protocol.ECT1).AnyTimes()
+
+	maxPacketSize := tc.conn.maxPacketSize()
+	// Use a segment size that leaves < maxPacketSize at the tail of MaxLargePacketBufferSize
+	// (20480): 19 * 1024 = 19456, leaving 1024 bytes (< 1200).
+	const segSize = 1024
+	batch1Segs := (protocol.MaxLargePacketBufferSize-int(maxPacketSize))/segSize + 1
+	seg := bytes.Repeat([]byte{1}, segSize)
+	for i := 0; i < batch1Segs+1; i++ {
+		tc.packer.EXPECT().AppendPacket(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+			func(buffer *packetBuffer, count protocol.ByteCount, _ time.Time, _ protocol.Version) (shortHeaderPacket, error) {
+				require.Equal(t, maxPacketSize, count, "packetMaxSize must stay full maxPacketSize")
+				buffer.Data = append(buffer.Data, seg...)
+				return shortHeaderPacket{PacketNumber: protocol.PacketNumber(i + 1)}, nil
+			},
+		)
+	}
+	tc.packer.EXPECT().AppendPacket(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(shortHeaderPacket{}, errNothingToPack)
+
+	done := make(chan struct{})
+	gomock.InOrder(
+		tc.sendConn.EXPECT().Write(bytes.Repeat(seg, batch1Segs), uint16(segSize), protocol.ECT1),
+		tc.sendConn.EXPECT().Write(seg, uint16(segSize), protocol.ECT1).DoAndReturn(
+			func([]byte, uint16, protocol.ECN) error { close(done); return nil },
+		),
+	)
+
+	errChan := make(chan error, 1)
+	go func() { errChan <- tc.conn.run() }()
+	tc.conn.scheduleSending()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	tc.connRunner.EXPECT().Remove(gomock.Any()).AnyTimes()
+	tc.conn.destroy(nil)
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout")
+	}
+}

@@ -972,3 +972,19 @@ func TestPackMTUProbePacket(t *testing.T) {
 	require.Len(t, buffer.Data, int(probePacketSize))
 	require.True(t, p.IsPathMTUProbePacket)
 }
+
+func TestPackOversizedDatagramDoesNotStrandNextDatagram(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+	tp.framer.EXPECT().HasData().AnyTimes()
+
+	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, 1200)}))
+	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("ok")}))
+
+	beforeDrops := datagramPackerDrops.Load()
+	pl := tp.packer.composeNextPacket(500, false, false, time.Now(), protocol.Version1)
+	require.Equal(t, beforeDrops+1, datagramPackerDrops.Load())
+	require.Len(t, pl.frames, 1)
+	require.Equal(t, []byte("ok"), pl.frames[0].Frame.(*wire.DatagramFrame).Data)
+	require.Nil(t, tp.datagramQueue.Peek())
+}

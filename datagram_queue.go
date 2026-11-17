@@ -168,6 +168,12 @@ func (h *datagramQueue) AddContext(ctx context.Context, f *wire.DatagramFrame) e
 	}()
 	for {
 		if err := context.Cause(ctx); err != nil {
+			if h.sendQueue.Len() < maxDatagramSendQueueLen {
+				select {
+				case h.sent <- struct{}{}:
+				default:
+				}
+			}
 			h.sendMx.Unlock()
 			return err
 		}
@@ -179,8 +185,16 @@ func (h *datagramQueue) AddContext(ctx context.Context, f *wire.DatagramFrame) e
 		}
 		if h.sendQueue.Len() < maxDatagramSendQueueLen {
 			h.sendQueue.PushBack(queuedDatagram{frame: f, sampledAt: datagramQueueWait.start()})
+			if h.sendQueue.Len() < maxDatagramSendQueueLen {
+				select {
+				case h.sent <- struct{}{}:
+				default:
+				}
+			}
 			h.sendMx.Unlock()
-			h.hasData()
+			if h.hasData != nil {
+				h.hasData()
+			}
 			return nil
 		}
 		select {

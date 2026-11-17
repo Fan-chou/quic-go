@@ -2227,8 +2227,10 @@ func (s *connection) sendPacketsWithGSO(now time.Time) error {
 			//    segment size (GSO requires uniform segments; this extends the
 			//    upstream full-size-only condition to DATAGRAM traffic)
 			// 3. The next packet will have the same ECN marking
-			// 4. We still have enough space for another packet in the buffer
-			if !dontSendMore && !stopMerging && segSize > 0 && size == segSize && nextECN == ecn && buf.Len()+segSize <= buf.Cap() {
+			// 4. We still have enough space for another full-size packet in the buffer
+			//    (keeping packetMaxSize == maxSize so DATAGRAM packing never sees an
+			//    artificially truncated tail budget and drops valid queued frames)
+			if !dontSendMore && !stopMerging && segSize > 0 && size == segSize && nextECN == ecn && buf.Len()+maxSize <= buf.Cap() {
 				continue
 			}
 
