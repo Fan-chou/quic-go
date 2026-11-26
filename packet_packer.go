@@ -29,6 +29,7 @@ type packer interface {
 
 	SetToken([]byte)
 	SetMaxDatagramFrameSize(protocol.ByteCount)
+	SetMax0RTTDatagramFrameSize(protocol.ByteCount)
 }
 
 type sealer interface {
@@ -127,7 +128,8 @@ type packetPacker struct {
 
 	token []byte
 
-	maxDatagramFrameSize protocol.ByteCount // the peer's max_datagram_frame_size
+	maxDatagramFrameSize     protocol.ByteCount // the peer's 1-RTT max_datagram_frame_size
+	max0RTTDatagramFrameSize protocol.ByteCount // the peer's 0-RTT max_datagram_frame_size from the session ticket
 
 	pnManager           packetNumberManager
 	framer              frameSource
@@ -584,7 +586,7 @@ func (p *packetPacker) maybeGetAppDataPacketFor0RTT(
 
 	hdr := p.getLongHeader(protocol.Encryption0RTT, v)
 	maxPayloadSize := maxPacketSize - hdr.GetLength(v) - protocol.ByteCount(sealer.Overhead())
-	return hdr, p.maybeGetAppDataPacket(maxPayloadSize, false, false, now, v)
+	return hdr, p.maybeGetAppDataPacket(maxPayloadSize, protocol.Encryption0RTT, false, false, now, v)
 }
 
 func (p *packetPacker) maybeGetShortHeaderPacket(
@@ -595,16 +597,17 @@ func (p *packetPacker) maybeGetShortHeaderPacket(
 	v protocol.Version,
 ) payload {
 	maxPayloadSize := maxPacketSize - hdrLen - protocol.ByteCount(sealer.Overhead())
-	return p.maybeGetAppDataPacket(maxPayloadSize, onlyAck, ackAllowed, now, v)
+	return p.maybeGetAppDataPacket(maxPayloadSize, protocol.Encryption1RTT, onlyAck, ackAllowed, now, v)
 }
 
 func (p *packetPacker) maybeGetAppDataPacket(
 	maxPayloadSize protocol.ByteCount,
+	encLevel protocol.EncryptionLevel,
 	onlyAck, ackAllowed bool,
 	now time.Time,
 	v protocol.Version,
 ) payload {
-	pl := p.composeNextPacket(maxPayloadSize, onlyAck, ackAllowed, now, v)
+	pl := p.composeNextPacket(maxPayloadSize, encLevel, onlyAck, ackAllowed, now, v)
 
 	// check if we have anything to send
 	if len(pl.frames) == 0 && len(pl.streamFrames) == 0 {
@@ -628,6 +631,7 @@ func (p *packetPacker) maybeGetAppDataPacket(
 
 func (p *packetPacker) composeNextPacket(
 	maxFrameSize protocol.ByteCount,
+	encLevel protocol.EncryptionLevel,
 	onlyAck, ackAllowed bool,
 	now time.Time,
 	v protocol.Version,
@@ -653,11 +657,18 @@ func (p *packetPacker) composeNextPacket(
 	}
 
 	if p.datagramQueue != nil {
+		maxDatagramFrameSize := p.maxDatagramFrameSize
+		if encLevel == protocol.Encryption0RTT {
+			maxDatagramFrameSize = p.max0RTTDatagramFrameSize
+		}
 		for f := p.datagramQueue.Peek(); f != nil; f = p.datagramQueue.Peek() {
 			size := f.Length(v)
-			// RFC 9221, Section 3: DATAGRAM frames MUST NOT be larger than the peer's max_datagram_frame_size.
-			// Frames queued during 0-RTT can exceed it if the server rejected 0-RTT and reduced the limit.
-			tooLarge := size > p.maxDatagramFrameSize
+			// RFC 9221, Section 3: DATAGRAM frames MUST NOT be larger than the peer's
+			// max_datagram_frame_size for the active encryption level.
+			// During 0-RTT we enforce the session ticket's limit; if the server increased
+			// the 1-RTT limit in EncryptedExtensions, leave frames that fit 1-RTT queued
+			// instead of sending them in 0-RTT or dropping them.
+			tooLarge := size > maxDatagramFrameSize
 			if !tooLarge && size <= maxFrameSize-pl.length { // DATAGRAM frame fits
 				pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
 				pl.length += size
@@ -668,16 +679,19 @@ func (p *packetPacker) composeNextPacket(
 					break
 				}
 				continue
-			} else if tooLarge || (!hasAck && len(pl.frames) == 0) {
+			} else if tooLarge {
+				if encLevel == protocol.Encryption0RTT && size <= p.maxDatagramFrameSize {
+					break
+				}
 				datagramPackerDrops.Add(1)
-				// The DATAGRAM frame exceeds the peer's limit, or doesn't fit and the packet
-				// doesn't contain an ACK or earlier frames.
-				// Discard this frame. There's no point in retrying this in the next packet,
-				// as it's unlikely that the available packet size will increase.
 				p.datagramQueue.Pop()
-				// Unpacked send frames are reclaimed after the queue releases them.
-				// Keep draining queued frames so a smaller datagram behind an
+				continue
+			} else if !hasAck && len(pl.frames) == 0 {
+				datagramPackerDrops.Add(1)
+				// The DATAGRAM frame doesn't fit, and the packet doesn't contain an ACK
+				// or earlier frames. Discard it so a smaller datagram behind an
 				// oversized one is not stranded behind errNothingToPack.
+				p.datagramQueue.Pop()
 				continue
 			}
 			// If the DATAGRAM frame was too large and the packet contained an ACK, we'll try to send it out later.
@@ -743,7 +757,7 @@ func (p *packetPacker) MaybePackProbePacket(
 		connID := p.getDestConnID()
 		pn, pnLen := p.pnManager.PeekPacketNumber(protocol.Encryption1RTT)
 		hdrLen := wire.ShortHeaderLen(connID, pnLen)
-		pl := p.maybeGetAppDataPacket(maxPacketSize-protocol.ByteCount(s.Overhead())-hdrLen, false, true, now, v)
+		pl := p.maybeGetAppDataPacket(maxPacketSize-protocol.ByteCount(s.Overhead())-hdrLen, protocol.Encryption1RTT, false, true, now, v)
 		if pl.length == 0 {
 			return nil, nil
 		}
@@ -981,7 +995,12 @@ func (p *packetPacker) SetToken(token []byte) {
 	p.token = token
 }
 
-// SetMaxDatagramFrameSize sets the peer's max_datagram_frame_size.
+// SetMaxDatagramFrameSize sets the peer's 1-RTT max_datagram_frame_size.
 func (p *packetPacker) SetMaxDatagramFrameSize(size protocol.ByteCount) {
 	p.maxDatagramFrameSize = size
+}
+
+// SetMax0RTTDatagramFrameSize sets the peer's 0-RTT max_datagram_frame_size from the session ticket.
+func (p *packetPacker) SetMax0RTTDatagramFrameSize(size protocol.ByteCount) {
+	p.max0RTTDatagramFrameSize = size
 }

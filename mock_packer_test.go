@@ -318,6 +318,42 @@ func (c *MockPackerPackMTUProbePacketCall) DoAndReturn(f func(ackhandler.Frame, 
 	return c
 }
 
+// SetMax0RTTDatagramFrameSize mocks base method.
+func (m *MockPacker) SetMax0RTTDatagramFrameSize(arg0 protocol.ByteCount) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetMax0RTTDatagramFrameSize", arg0)
+}
+
+// SetMax0RTTDatagramFrameSize indicates an expected call of SetMax0RTTDatagramFrameSize.
+func (mr *MockPackerMockRecorder) SetMax0RTTDatagramFrameSize(arg0 any) *MockPackerSetMax0RTTDatagramFrameSizeCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetMax0RTTDatagramFrameSize", reflect.TypeOf((*MockPacker)(nil).SetMax0RTTDatagramFrameSize), arg0)
+	return &MockPackerSetMax0RTTDatagramFrameSizeCall{Call: call}
+}
+
+// MockPackerSetMax0RTTDatagramFrameSizeCall wrap *gomock.Call
+type MockPackerSetMax0RTTDatagramFrameSizeCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockPackerSetMax0RTTDatagramFrameSizeCall) Return() *MockPackerSetMax0RTTDatagramFrameSizeCall {
+	c.Call = c.Call.Return()
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockPackerSetMax0RTTDatagramFrameSizeCall) Do(f func(protocol.ByteCount)) *MockPackerSetMax0RTTDatagramFrameSizeCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockPackerSetMax0RTTDatagramFrameSizeCall) DoAndReturn(f func(protocol.ByteCount)) *MockPackerSetMax0RTTDatagramFrameSizeCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // SetMaxDatagramFrameSize mocks base method.
 func (m *MockPacker) SetMaxDatagramFrameSize(arg0 protocol.ByteCount) {
 	m.ctrl.T.Helper()

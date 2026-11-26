@@ -631,7 +631,7 @@ func TestPackQueuedSmallDatagrams(t *testing.T) {
 			packets := 0
 			beforeDrops := datagramPackerDrops.Load()
 			for tp.datagramQueue.Peek() != nil {
-				pl := tp.packer.composeNextPacket(frameBudget, false, false, time.Now(), protocol.Version1)
+				pl := tp.packer.composeNextPacket(frameBudget, protocol.Encryption1RTT, false, false, time.Now(), protocol.Version1)
 				require.NotEmpty(t, pl.frames)
 				require.LessOrEqual(t, pl.length, frameBudget)
 				for _, f := range pl.frames {
@@ -673,7 +673,7 @@ func TestPackDatagramsLeavesRoomForReliableData(t *testing.T) {
 						return append(frames, ackhandler.Frame{Frame: &wire.PingFrame{}}), streams, 1
 					})
 			}
-			pl := tp.packer.composeNextPacket(1200, false, false, time.Now(), protocol.Version1)
+			pl := tp.packer.composeNextPacket(1200, protocol.Encryption1RTT, false, false, time.Now(), protocol.Version1)
 			require.Len(t, pl.frames, 2)
 			require.IsType(t, &wire.DatagramFrame{}, pl.frames[0].Frame)
 			require.IsType(t, &wire.PingFrame{}, pl.frames[1].Frame)
@@ -987,7 +987,7 @@ func TestPackOversizedDatagramDoesNotStrandNextDatagram(t *testing.T) {
 	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("ok")}))
 
 	beforeDrops := datagramPackerDrops.Load()
-	pl := tp.packer.composeNextPacket(500, false, false, time.Now(), protocol.Version1)
+	pl := tp.packer.composeNextPacket(500, protocol.Encryption1RTT, false, false, time.Now(), protocol.Version1)
 	require.Equal(t, beforeDrops+1, datagramPackerDrops.Load())
 	require.Len(t, pl.frames, 1)
 	require.Equal(t, []byte("ok"), pl.frames[0].Frame.(*wire.DatagramFrame).Data)
@@ -1005,10 +1005,37 @@ func TestPackDatagramExceedingPeerMaxSizeIsDropped(t *testing.T) {
 	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("baz")}))
 
 	beforeDrops := datagramPackerDrops.Load()
-	pl := tp.packer.composeNextPacket(1200, false, false, time.Now(), protocol.Version1)
+	pl := tp.packer.composeNextPacket(1200, protocol.Encryption1RTT, false, false, time.Now(), protocol.Version1)
 	require.Equal(t, beforeDrops+1, datagramPackerDrops.Load())
 	require.Len(t, pl.frames, 2)
 	require.Equal(t, []byte("foo"), pl.frames[0].Frame.(*wire.DatagramFrame).Data)
 	require.Equal(t, []byte("baz"), pl.frames[1].Frame.(*wire.DatagramFrame).Data)
+	require.Nil(t, tp.datagramQueue.Peek())
+}
+
+func TestPack0RTTDatagramRespectsTicketLimitWhen1RTTIncreases(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveClient)
+	tp.packer.SetMax0RTTDatagramFrameSize(5)
+	tp.packer.SetMaxDatagramFrameSize(12)
+	tp.framer.EXPECT().HasData().AnyTimes()
+
+	// 3-byte payload has wire length 5 (fits 0-RTT ticket limit of 5).
+	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("foo")}))
+	// 6-byte payload has wire length 8 (exceeds 0-RTT limit 5, fits new 1-RTT limit 12).
+	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("foobar")}))
+
+	beforeDrops := datagramPackerDrops.Load()
+	pl0 := tp.packer.composeNextPacket(1200, protocol.Encryption0RTT, false, false, time.Now(), protocol.Version1)
+	require.Equal(t, beforeDrops, datagramPackerDrops.Load())
+	require.Len(t, pl0.frames, 1)
+	require.Equal(t, []byte("foo"), pl0.frames[0].Frame.(*wire.DatagramFrame).Data)
+	// Larger frame remains queued for 1-RTT rather than being sent in 0-RTT or dropped.
+	require.NotNil(t, tp.datagramQueue.Peek())
+
+	pl1 := tp.packer.composeNextPacket(1200, protocol.Encryption1RTT, false, false, time.Now(), protocol.Version1)
+	require.Equal(t, beforeDrops, datagramPackerDrops.Load())
+	require.Len(t, pl1.frames, 1)
+	require.Equal(t, []byte("foobar"), pl1.frames[0].Frame.(*wire.DatagramFrame).Data)
 	require.Nil(t, tp.datagramQueue.Peek())
 }

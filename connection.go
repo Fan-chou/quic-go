@@ -1843,7 +1843,7 @@ func (s *connection) restoreTransportParameters(params *wire.TransportParameters
 	}
 
 	s.peerParams.Store(params)
-	s.packer.SetMaxDatagramFrameSize(params.MaxDatagramFrameSize)
+	s.packer.SetMax0RTTDatagramFrameSize(params.MaxDatagramFrameSize)
 	s.connIDGenerator.SetMaxActiveConnIDs(params.ActiveConnectionIDLimit)
 	s.framer.UpdateSendWindow(params.InitialMaxData)
 	s.streamsMap.UpdateLimits(params)
