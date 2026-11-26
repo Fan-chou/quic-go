@@ -192,6 +192,44 @@ func (c *MockConnectionFlowControllerIsNewlyBlockedCall) DoAndReturn(f func() (b
 	return c
 }
 
+// IsBlocked mocks base method.
+func (m *MockConnectionFlowController) IsBlocked() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IsBlocked")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// IsBlocked indicates an expected call of IsBlocked.
+func (mr *MockConnectionFlowControllerMockRecorder) IsBlocked() *MockConnectionFlowControllerIsBlockedCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsBlocked", reflect.TypeOf((*MockConnectionFlowController)(nil).IsBlocked))
+	return &MockConnectionFlowControllerIsBlockedCall{Call: call}
+}
+
+// MockConnectionFlowControllerIsBlockedCall wrap *gomock.Call
+type MockConnectionFlowControllerIsBlockedCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockConnectionFlowControllerIsBlockedCall) Return(arg0 bool) *MockConnectionFlowControllerIsBlockedCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockConnectionFlowControllerIsBlockedCall) Do(f func() bool) *MockConnectionFlowControllerIsBlockedCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockConnectionFlowControllerIsBlockedCall) DoAndReturn(f func() bool) *MockConnectionFlowControllerIsBlockedCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // Reset mocks base method.
 func (m *MockConnectionFlowController) Reset() error {
 	m.ctrl.T.Helper()

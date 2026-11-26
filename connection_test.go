@@ -39,7 +39,10 @@ func connectionOptStreamManager(sm *MockStreamManager) testConnectionOpt {
 }
 
 func connectionOptConnFlowController(cfc *mocks.MockConnectionFlowController) testConnectionOpt {
-	return func(conn *connection) { conn.connFlowController = cfc }
+	return func(conn *connection) {
+		conn.connFlowController = cfc
+		conn.framer = newFramer(cfc)
+	}
 }
 
 func connectionOptTracer(tr *logging.ConnectionTracer) testConnectionOpt {
@@ -107,6 +110,7 @@ func newServerTestConnection(
 	sendConn.EXPECT().LocalAddr().Return(localAddr).AnyTimes()
 	sendConn.EXPECT().SetRemoteAddr(gomock.Any()).AnyTimes()
 	packer := NewMockPacker(mockCtrl)
+	packer.EXPECT().SetMaxDatagramFrameSize(gomock.Any()).AnyTimes()
 	b := make([]byte, 12)
 	rand.Read(b)
 	origDestConnID := protocol.ParseConnectionID(b[:6])
@@ -168,6 +172,7 @@ func newClientTestConnection(
 	sendConn.EXPECT().LocalAddr().Return(localAddr).AnyTimes()
 	sendConn.EXPECT().SetRemoteAddr(gomock.Any()).AnyTimes()
 	packer := NewMockPacker(mockCtrl)
+	packer.EXPECT().SetMaxDatagramFrameSize(gomock.Any()).AnyTimes()
 	b := make([]byte, 12)
 	rand.Read(b)
 	destConnID := protocol.ParseConnectionID(b[:6])
@@ -350,9 +355,15 @@ func TestConnectionHandleConnectionFlowControlFrames(t *testing.T) {
 	tc := newServerTestConnection(t, mockCtrl, nil, false, connectionOptConnFlowController(connFC))
 	now := time.Now()
 	connID := protocol.ConnectionID{}
+	str := NewMockSendStreamI(mockCtrl)
+	str.EXPECT().popStreamFrame(gomock.Any(), gomock.Any()).Return(ackhandler.StreamFrame{}, nil, sendStateConnBlocked)
+	connFC.EXPECT().IsNewlyBlocked().Return(false, protocol.ByteCount(0))
+	tc.conn.framer.AddActiveStream(4, str)
+	tc.conn.framer.Append(nil, nil, 1000, now, protocol.Version1)
 	// MAX_DATA frame
-	connFC.EXPECT().UpdateSendWindow(protocol.ByteCount(1337))
+	connFC.EXPECT().UpdateSendWindow(protocol.ByteCount(1337)).Return(true)
 	require.NoError(t, tc.conn.handleFrame(&wire.MaxDataFrame{MaximumData: 1337}, protocol.Encryption1RTT, connID, now))
+	require.True(t, tc.conn.framer.HasData()) // the stream blocked on connection flow control is queued again
 	// DATA_BLOCKED frame
 	require.NoError(t, tc.conn.handleFrame(&wire.DataBlockedFrame{MaximumData: 1337}, protocol.Encryption1RTT, connID, now))
 }

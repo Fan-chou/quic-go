@@ -28,6 +28,7 @@ type packer interface {
 	PackMTUProbePacket(ping ackhandler.Frame, size protocol.ByteCount, v protocol.Version) (shortHeaderPacket, *packetBuffer, error)
 
 	SetToken([]byte)
+	SetMaxDatagramFrameSize(protocol.ByteCount)
 }
 
 type sealer interface {
@@ -125,6 +126,8 @@ type packetPacker struct {
 	handshakeStream *cryptoStream
 
 	token []byte
+
+	maxDatagramFrameSize protocol.ByteCount // the peer's max_datagram_frame_size
 
 	pnManager           packetNumberManager
 	framer              frameSource
@@ -652,7 +655,10 @@ func (p *packetPacker) composeNextPacket(
 	if p.datagramQueue != nil {
 		for f := p.datagramQueue.Peek(); f != nil; f = p.datagramQueue.Peek() {
 			size := f.Length(v)
-			if size <= maxFrameSize-pl.length { // DATAGRAM frame fits
+			// RFC 9221, Section 3: DATAGRAM frames MUST NOT be larger than the peer's max_datagram_frame_size.
+			// Frames queued during 0-RTT can exceed it if the server rejected 0-RTT and reduced the limit.
+			tooLarge := size > p.maxDatagramFrameSize
+			if !tooLarge && size <= maxFrameSize-pl.length { // DATAGRAM frame fits
 				pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
 				pl.length += size
 				p.datagramQueue.Pop()
@@ -662,9 +668,10 @@ func (p *packetPacker) composeNextPacket(
 					break
 				}
 				continue
-			} else if !hasAck && len(pl.frames) == 0 {
+			} else if tooLarge || (!hasAck && len(pl.frames) == 0) {
 				datagramPackerDrops.Add(1)
-				// The DATAGRAM frame doesn't fit, and the packet doesn't contain an ACK.
+				// The DATAGRAM frame exceeds the peer's limit, or doesn't fit and the packet
+				// doesn't contain an ACK or earlier frames.
 				// Discard this frame. There's no point in retrying this in the next packet,
 				// as it's unlikely that the available packet size will increase.
 				p.datagramQueue.Pop()
@@ -972,4 +979,9 @@ func (p *packetPacker) encryptPacket(raw []byte, sealer sealer, pn protocol.Pack
 
 func (p *packetPacker) SetToken(token []byte) {
 	p.token = token
+}
+
+// SetMaxDatagramFrameSize sets the peer's max_datagram_frame_size.
+func (p *packetPacker) SetMaxDatagramFrameSize(size protocol.ByteCount) {
+	p.maxDatagramFrameSize = size
 }

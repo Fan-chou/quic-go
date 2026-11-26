@@ -23,6 +23,19 @@ const (
 // (which is the RESET_STREAM frame).
 const maxStreamControlFrameSize = 25
 
+// sendState says what a stream can send after popping a STREAM frame.
+type sendState uint8
+
+const (
+	// The stream has nothing to send, or is blocked on stream flow control.
+	// It is queued again when it has data to send, or receives a MAX_STREAM_DATA frame.
+	sendStateIdle sendState = iota
+	// The stream has more data to send.
+	sendStateReady
+	// The stream has more data to send, but is blocked on connection flow control.
+	sendStateConnBlocked
+)
+
 type streamControlFrameGetter interface {
 	getControlFrame(time.Time) (_ ackhandler.Frame, ok, hasMore bool)
 }
@@ -31,6 +44,9 @@ type framer struct {
 	mutex sync.Mutex
 
 	activeStreams            map[protocol.StreamID]sendStreamI
+	// Streams blocked on connection flow control aren't in the active queue.
+	// They are queued again when the connection's send window increases.
+	connBlockedStreams       map[protocol.StreamID]sendStreamI
 	streamQueue              ringbuffer.RingBuffer[protocol.StreamID]
 	streamsWithControlFrames map[protocol.StreamID]streamControlFrameGetter
 
@@ -44,6 +60,7 @@ type framer struct {
 func newFramer(connFlowController flowcontrol.ConnectionFlowController) *framer {
 	return &framer{
 		activeStreams:            make(map[protocol.StreamID]sendStreamI),
+		connBlockedStreams:       make(map[protocol.StreamID]sendStreamI),
 		streamsWithControlFrames: make(map[protocol.StreamID]streamControlFrameGetter),
 		connFlowController:       connFlowController,
 	}
@@ -96,6 +113,8 @@ func (f *framer) Append(
 
 	var lastFrame ackhandler.StreamFrame
 	var streamFrameLen protocol.ByteCount
+	// set if a stream sent new data, or has data but is blocked on stream flow control
+	var hasData bool
 	f.mutex.Lock()
 	// pop STREAM frames, until less than 128 bytes are left in the packet
 	numActiveStreams := f.streamQueue.Len()
@@ -109,10 +128,14 @@ func (f *framer) Append(
 			maxLen -= sf.Frame.Length(v)
 			lastFrame = sf
 			streamFrameLen += sf.Frame.Length(v)
+			if sf.Frame.DataLen() > 0 {
+				hasData = true
+			}
 		}
 		// If the stream just became blocked on stream flow control, attempt to pack the
 		// STREAM_DATA_BLOCKED into the same packet.
 		if blocked != nil {
+			hasData = true
 			l := blocked.Length(v)
 			// In case it doesn't fit, queue it for the next packet.
 			if maxLen < l {
@@ -125,9 +148,7 @@ func (f *framer) Append(
 		}
 	}
 
-	// The only way to become blocked on connection-level flow control is by sending STREAM frames.
-	if isBlocked, offset := f.connFlowController.IsNewlyBlocked(); isBlocked {
-		blocked := &wire.DataBlockedFrame{MaximumData: offset}
+	if blocked := f.maybeGetDataBlockedFrame(hasData); blocked != nil {
 		l := blocked.Length(v)
 		// In case it doesn't fit, queue it for the next packet.
 		if maxLen >= l {
@@ -149,6 +170,19 @@ func (f *framer) Append(
 	}
 
 	return frames, streamFrames, controlFrameLen + streamFrameLen
+}
+
+// maybeGetDataBlockedFrame must be called with the mutex held.
+func (f *framer) maybeGetDataBlockedFrame(hasData bool) *wire.DataBlockedFrame {
+	// Only report the connection as blocked if a stream has data to send.
+	if !hasData && len(f.connBlockedStreams) == 0 {
+		return nil
+	}
+	isBlocked, offset := f.connFlowController.IsNewlyBlocked()
+	if !isBlocked {
+		return nil
+	}
+	return &wire.DataBlockedFrame{MaximumData: offset}
 }
 
 func (f *framer) appendControlFrames(
@@ -218,6 +252,9 @@ func (f *framer) QueuedTooManyControlFrames() bool {
 func (f *framer) AddActiveStream(id protocol.StreamID, str sendStreamI) {
 	f.mutex.Lock()
 	if _, ok := f.activeStreams[id]; !ok {
+		// A stream blocked on connection flow control is queued again,
+		// since it might now have data that doesn't need flow control credit (e.g. a FIN or retransmission).
+		delete(f.connBlockedStreams, id)
 		f.streamQueue.PushBack(id)
 		f.activeStreams[id] = str
 	}
@@ -236,10 +273,29 @@ func (f *framer) AddStreamWithControlFrames(id protocol.StreamID, str streamCont
 func (f *framer) RemoveActiveStream(id protocol.StreamID) {
 	f.mutex.Lock()
 	delete(f.activeStreams, id)
+	delete(f.connBlockedStreams, id)
 	// We don't delete the stream from the streamQueue,
 	// since we'd have to iterate over the ringbuffer.
 	// Instead, we check if the stream is still in activeStreams when appending STREAM frames.
 	f.mutex.Unlock()
+}
+
+// UpdateSendWindow is called when the peer increases the connection-level flow control limit.
+func (f *framer) UpdateSendWindow(offset protocol.ByteCount) {
+	if !f.connFlowController.UpdateSendWindow(offset) {
+		return
+	}
+
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+
+	for id, str := range f.connBlockedStreams {
+		if _, ok := f.activeStreams[id]; !ok {
+			f.streamQueue.PushBack(id)
+			f.activeStreams[id] = str
+		}
+	}
+	clear(f.connBlockedStreams)
 }
 
 func (f *framer) getNextStreamFrame(maxLen protocol.ByteCount, v protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame) {
@@ -255,15 +311,20 @@ func (f *framer) getNextStreamFrame(maxLen protocol.ByteCount, v protocol.Versio
 	// Therefore, we can pretend to have more bytes available when popping
 	// the STREAM frame (which will always have the DataLen set).
 	maxLen += protocol.ByteCount(quicvarint.Len(uint64(maxLen)))
-	frame, blocked, hasMoreData := str.popStreamFrame(maxLen, v)
-	if hasMoreData { // put the stream back in the queue (at the end)
-		f.streamQueue.PushBack(id)
-	} else { // no more data to send. Stream is not active
+	frame, blocked, state := str.popStreamFrame(maxLen, v)
+	switch state {
+	case sendStateIdle:
 		delete(f.activeStreams, id)
+	case sendStateReady: // put the stream back in the queue (at the end)
+		f.streamQueue.PushBack(id)
+	case sendStateConnBlocked:
+		delete(f.activeStreams, id)
+		f.connBlockedStreams[id] = str
 	}
 	// Note that the frame.Frame can be nil:
 	// * if the stream was canceled after it said it had data
 	// * the remaining size doesn't allow us to add another STREAM frame
+	// * if the stream is blocked on flow control
 	return frame, blocked
 }
 
@@ -274,9 +335,8 @@ func (f *framer) Handle0RTTRejection() {
 	defer f.controlFrameMutex.Unlock()
 
 	f.streamQueue.Clear()
-	for id := range f.activeStreams {
-		delete(f.activeStreams, id)
-	}
+	clear(f.activeStreams)
+	clear(f.connBlockedStreams)
 	var j int
 	for i, frame := range f.controlFrames {
 		switch frame.(type) {

@@ -329,6 +329,29 @@ func TestRejectFrequentKeyUpdates(t *testing.T) {
 	}, err)
 }
 
+func TestKeyUpdateOldKeysOnlyBelowLowestNewKeyPacket(t *testing.T) {
+	client, server, serverTracer := setupEndpoints(t, &utils.RTTStats{})
+	serverTracer.EXPECT().UpdatedKey(protocol.KeyPhase(1), true)
+	now := time.Now()
+
+	old14 := client.Seal(nil, []byte(msg), 14, []byte(ad))
+	old17 := client.Seal(nil, []byte(msg), 17, []byte(ad))
+	client.rollKeys()
+	_, err := server.Open(nil, client.Seal(nil, []byte(msg), 20, []byte(ad)), now, 20, protocol.KeyPhaseOne, []byte(ad))
+	require.NoError(t, err)
+	// reordered: 17 is below every packet received with the new keys
+	_, err = server.Open(nil, old17, now, 17, protocol.KeyPhaseZero, []byte(ad))
+	require.NoError(t, err)
+
+	_, err = server.Open(nil, client.Seal(nil, []byte(msg), 15, []byte(ad)), now, 15, protocol.KeyPhaseOne, []byte(ad))
+	require.NoError(t, err)
+	// 15 used the new keys, so 17 can't use the old keys anymore
+	_, err = server.Open(nil, old17, now, 17, protocol.KeyPhaseZero, []byte(ad))
+	require.ErrorIs(t, err, ErrDecryptionFailed)
+	_, err = server.Open(nil, old14, now, 14, protocol.KeyPhaseZero, []byte(ad))
+	require.NoError(t, err)
+}
+
 func setKeyUpdateIntervals(t *testing.T, firstKeyUpdateInterval, keyUpdateInterval uint64) {
 	origKeyUpdateInterval := KeyUpdateInterval()
 	origFirstKeyUpdateInterval := FirstKeyUpdateInterval()

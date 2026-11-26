@@ -1516,7 +1516,7 @@ func (s *connection) handleStreamFrame(frame *wire.StreamFrame, rcvTime time.Tim
 }
 
 func (s *connection) handleMaxDataFrame(frame *wire.MaxDataFrame) {
-	s.connFlowController.UpdateSendWindow(frame.MaximumData)
+	s.framer.UpdateSendWindow(frame.MaximumData)
 }
 
 func (s *connection) handleMaxStreamDataFrame(frame *wire.MaxStreamDataFrame) error {
@@ -1843,8 +1843,9 @@ func (s *connection) restoreTransportParameters(params *wire.TransportParameters
 	}
 
 	s.peerParams.Store(params)
+	s.packer.SetMaxDatagramFrameSize(params.MaxDatagramFrameSize)
 	s.connIDGenerator.SetMaxActiveConnIDs(params.ActiveConnectionIDLimit)
-	s.connFlowController.UpdateSendWindow(params.InitialMaxData)
+	s.framer.UpdateSendWindow(params.InitialMaxData)
 	s.streamsMap.UpdateLimits(params)
 	s.connStateMutex.Lock()
 	s.connState.SupportsDatagrams = s.supportsDatagrams()
@@ -1870,6 +1871,7 @@ func (s *connection) handleTransportParameters(params *wire.TransportParameters)
 	}
 
 	s.peerParams.Store(params)
+	s.packer.SetMaxDatagramFrameSize(params.MaxDatagramFrameSize)
 	// On the client side we have to wait for handshake completion.
 	// During a 0-RTT connection, we are only allowed to use the new transport parameters for 1-RTT packets.
 	if s.perspective == protocol.PerspectiveServer {
@@ -1926,7 +1928,7 @@ func (s *connection) applyTransportParameters() {
 	s.keepAliveInterval = min(s.config.KeepAlivePeriod, s.idleTimeout/2)
 	s.streamsMap.UpdateLimits(params)
 	s.frameParser.SetAckDelayExponent(params.AckDelayExponent)
-	s.connFlowController.UpdateSendWindow(params.InitialMaxData)
+	s.framer.UpdateSendWindow(params.InitialMaxData)
 	s.rttStats.SetMaxAckDelay(params.MaxAckDelay)
 	s.connIDGenerator.SetMaxActiveConnIDs(params.ActiveConnectionIDLimit)
 	if params.StatelessResetToken != nil {

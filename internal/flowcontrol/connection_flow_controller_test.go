@@ -67,6 +67,9 @@ func TestConnectionFlowControllerReset(t *testing.T) {
 	require.Equal(t, protocol.ByteCount(90), fc.SendWindowSize())
 	require.NoError(t, fc.Reset())
 	require.Zero(t, fc.SendWindowSize())
+	blocked, offset := fc.IsNewlyBlocked()
+	require.True(t, blocked)
+	require.Zero(t, offset)
 }
 
 func TestConnectionFlowControllerResetAfterReading(t *testing.T) {

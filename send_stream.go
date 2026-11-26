@@ -18,7 +18,7 @@ type sendStreamI interface {
 	SendStream
 	handleStopSendingFrame(*wire.StopSendingFrame)
 	hasData() bool
-	popStreamFrame(protocol.ByteCount, protocol.Version) (_ ackhandler.StreamFrame, _ *wire.StreamDataBlockedFrame, hasMore bool)
+	popStreamFrame(protocol.ByteCount, protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, sendState)
 	closeForShutdown(error)
 	updateSendWindow(protocol.ByteCount)
 }
@@ -221,21 +221,41 @@ func (s *sendStream) canBufferStreamFrame() bool {
 
 // popStreamFrame returns the next STREAM frame that is supposed to be sent on this stream
 // maxBytes is the maximum length this frame (including frame header) will have.
-func (s *sendStream) popStreamFrame(maxBytes protocol.ByteCount, v protocol.Version) (_ ackhandler.StreamFrame, _ *wire.StreamDataBlockedFrame, hasMore bool) {
+func (s *sendStream) popStreamFrame(maxBytes protocol.ByteCount, v protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, sendState) {
 	s.mutex.Lock()
 	f, blocked, hasMoreData := s.popNewOrRetransmittedStreamFrame(maxBytes, v)
 	if f != nil {
 		s.numOutstandingFrames++
 	}
+	state := sendStateIdle
+	if hasMoreData && blocked == nil {
+		state = s.sendState()
+	}
 	s.mutex.Unlock()
 
 	if f == nil {
-		return ackhandler.StreamFrame{}, blocked, hasMoreData
+		return ackhandler.StreamFrame{}, blocked, state
 	}
 	return ackhandler.StreamFrame{
 		Frame:   f,
 		Handler: (*sendStreamAckHandler)(s),
-	}, blocked, hasMoreData
+	}, blocked, state
+}
+
+// sendState is called after popping a frame, if the stream might have more to send.
+func (s *sendStream) sendState() sendState {
+	// Retransmissions and FIN frames do not need flow control credit.
+	if len(s.retransmissionQueue) > 0 || (len(s.dataForWriting) == 0 && s.nextFrame == nil) {
+		return sendStateReady
+	}
+	// The stream is queued again when it receives a MAX_STREAM_DATA frame.
+	if s.flowController.IsBlocked() {
+		return sendStateIdle
+	}
+	if s.flowController.IsConnectionBlocked() {
+		return sendStateConnBlocked
+	}
+	return sendStateReady
 }
 
 func (s *sendStream) popNewOrRetransmittedStreamFrame(maxBytes protocol.ByteCount, v protocol.Version) (_ *wire.StreamFrame, _ *wire.StreamDataBlockedFrame, hasMoreData bool) {

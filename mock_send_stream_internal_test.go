@@ -382,12 +382,12 @@ func (c *MockSendStreamIhasDataCall) DoAndReturn(f func() bool) *MockSendStreamI
 }
 
 // popStreamFrame mocks base method.
-func (m *MockSendStreamI) popStreamFrame(arg0 protocol.ByteCount, arg1 protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, bool) {
+func (m *MockSendStreamI) popStreamFrame(arg0 protocol.ByteCount, arg1 protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, sendState) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "popStreamFrame", arg0, arg1)
 	ret0, _ := ret[0].(ackhandler.StreamFrame)
 	ret1, _ := ret[1].(*wire.StreamDataBlockedFrame)
-	ret2, _ := ret[2].(bool)
+	ret2, _ := ret[2].(sendState)
 	return ret0, ret1, ret2
 }
 
@@ -404,19 +404,19 @@ type MockSendStreamIpopStreamFrameCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockSendStreamIpopStreamFrameCall) Return(arg0 ackhandler.StreamFrame, arg1 *wire.StreamDataBlockedFrame, hasMore bool) *MockSendStreamIpopStreamFrameCall {
-	c.Call = c.Call.Return(arg0, arg1, hasMore)
+func (c *MockSendStreamIpopStreamFrameCall) Return(arg0 ackhandler.StreamFrame, arg1 *wire.StreamDataBlockedFrame, state sendState) *MockSendStreamIpopStreamFrameCall {
+	c.Call = c.Call.Return(arg0, arg1, state)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockSendStreamIpopStreamFrameCall) Do(f func(protocol.ByteCount, protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, bool)) *MockSendStreamIpopStreamFrameCall {
+func (c *MockSendStreamIpopStreamFrameCall) Do(f func(protocol.ByteCount, protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, sendState)) *MockSendStreamIpopStreamFrameCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockSendStreamIpopStreamFrameCall) DoAndReturn(f func(protocol.ByteCount, protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, bool)) *MockSendStreamIpopStreamFrameCall {
+func (c *MockSendStreamIpopStreamFrameCall) DoAndReturn(f func(protocol.ByteCount, protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, sendState)) *MockSendStreamIpopStreamFrameCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

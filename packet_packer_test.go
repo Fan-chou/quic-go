@@ -560,6 +560,7 @@ func TestPackPathChallengeAndPathResponse(t *testing.T) {
 func TestPackDatagramFrames(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+	tp.packer.SetMaxDatagramFrameSize(wire.MaxDatagramSize)
 
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true)
 	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
@@ -585,6 +586,7 @@ func TestPackLargeDatagramFrame(t *testing.T) {
 	const maxPacketSize = 1000
 	mockCtrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+	tp.packer.SetMaxDatagramFrameSize(wire.MaxDatagramSize)
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true).Return(&wire.AckFrame{AckRanges: []wire.AckRange{{Largest: 100}}})
 	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
 	tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42))
@@ -618,6 +620,7 @@ func TestPackQueuedSmallDatagrams(t *testing.T) {
 		t.Run(fmt.Sprint(frameBudget), func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			tp := newTestPacketPacker(t, ctrl, protocol.PerspectiveServer)
+			tp.packer.SetMaxDatagramFrameSize(wire.MaxDatagramSize)
 			tp.framer.EXPECT().HasData().AnyTimes()
 			for i := byte(0); i < 10; i++ {
 				require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{
@@ -655,6 +658,7 @@ func TestPackDatagramsLeavesRoomForReliableData(t *testing.T) {
 		t.Run(fmt.Sprint(retransmit), func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			tp := newTestPacketPacker(t, ctrl, protocol.PerspectiveServer)
+			tp.packer.SetMaxDatagramFrameSize(wire.MaxDatagramSize)
 			for i := 0; i < 10; i++ {
 				require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, 62)}))
 			}
@@ -976,6 +980,7 @@ func TestPackMTUProbePacket(t *testing.T) {
 func TestPackOversizedDatagramDoesNotStrandNextDatagram(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+	tp.packer.SetMaxDatagramFrameSize(wire.MaxDatagramSize)
 	tp.framer.EXPECT().HasData().AnyTimes()
 
 	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, 1200)}))
@@ -986,5 +991,24 @@ func TestPackOversizedDatagramDoesNotStrandNextDatagram(t *testing.T) {
 	require.Equal(t, beforeDrops+1, datagramPackerDrops.Load())
 	require.Len(t, pl.frames, 1)
 	require.Equal(t, []byte("ok"), pl.frames[0].Frame.(*wire.DatagramFrame).Data)
+	require.Nil(t, tp.datagramQueue.Peek())
+}
+
+func TestPackDatagramExceedingPeerMaxSizeIsDropped(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+	tp.packer.SetMaxDatagramFrameSize(5)
+	tp.framer.EXPECT().HasData().AnyTimes()
+
+	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("foo")}))
+	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("foobar")}))
+	require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("baz")}))
+
+	beforeDrops := datagramPackerDrops.Load()
+	pl := tp.packer.composeNextPacket(1200, false, false, time.Now(), protocol.Version1)
+	require.Equal(t, beforeDrops+1, datagramPackerDrops.Load())
+	require.Len(t, pl.frames, 2)
+	require.Equal(t, []byte("foo"), pl.frames[0].Frame.(*wire.DatagramFrame).Data)
+	require.Equal(t, []byte("baz"), pl.frames[1].Frame.(*wire.DatagramFrame).Data)
 	require.Nil(t, tp.datagramQueue.Peek())
 }

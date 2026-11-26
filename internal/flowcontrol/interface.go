@@ -9,6 +9,7 @@ import (
 type flowController interface {
 	// for sending
 	SendWindowSize() protocol.ByteCount
+	IsBlocked() bool
 	UpdateSendWindow(protocol.ByteCount) (updated bool)
 	AddBytesSent(protocol.ByteCount)
 	// for receiving
@@ -26,6 +27,7 @@ type StreamFlowController interface {
 	// Abandon is called when reading from the stream is aborted early,
 	// and there won't be any further calls to AddBytesRead.
 	Abandon()
+	IsConnectionBlocked() bool
 	IsNewlyBlocked() bool
 }
 

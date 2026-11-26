@@ -27,6 +27,7 @@ func NewConnectionFlowController(
 ) *connectionFlowController {
 	return &connectionFlowController{
 		baseFlowController: baseFlowController{
+			lastBlockedAt:        protocol.InvalidByteCount,
 			rttStats:             rttStats,
 			receiveWindow:        receiveWindow,
 			receiveWindowSize:    receiveWindow,
@@ -107,7 +108,7 @@ func (c *connectionFlowController) Reset() error {
 		return errors.New("flow controller reset after reading data")
 	}
 	c.bytesSent = 0
-	c.lastBlockedAt = 0
+	c.lastBlockedAt = protocol.InvalidByteCount
 	c.sendWindow = 0
 	return nil
 }

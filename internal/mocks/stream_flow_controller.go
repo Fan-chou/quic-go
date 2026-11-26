@@ -304,6 +304,82 @@ func (c *MockStreamFlowControllerUpdateHighestReceivedCall) DoAndReturn(f func(p
 	return c
 }
 
+// IsBlocked mocks base method.
+func (m *MockStreamFlowController) IsBlocked() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IsBlocked")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// IsBlocked indicates an expected call of IsBlocked.
+func (mr *MockStreamFlowControllerMockRecorder) IsBlocked() *MockStreamFlowControllerIsBlockedCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsBlocked", reflect.TypeOf((*MockStreamFlowController)(nil).IsBlocked))
+	return &MockStreamFlowControllerIsBlockedCall{Call: call}
+}
+
+// MockStreamFlowControllerIsBlockedCall wrap *gomock.Call
+type MockStreamFlowControllerIsBlockedCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockStreamFlowControllerIsBlockedCall) Return(arg0 bool) *MockStreamFlowControllerIsBlockedCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockStreamFlowControllerIsBlockedCall) Do(f func() bool) *MockStreamFlowControllerIsBlockedCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockStreamFlowControllerIsBlockedCall) DoAndReturn(f func() bool) *MockStreamFlowControllerIsBlockedCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// IsConnectionBlocked mocks base method.
+func (m *MockStreamFlowController) IsConnectionBlocked() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IsConnectionBlocked")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// IsConnectionBlocked indicates an expected call of IsConnectionBlocked.
+func (mr *MockStreamFlowControllerMockRecorder) IsConnectionBlocked() *MockStreamFlowControllerIsConnectionBlockedCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsConnectionBlocked", reflect.TypeOf((*MockStreamFlowController)(nil).IsConnectionBlocked))
+	return &MockStreamFlowControllerIsConnectionBlockedCall{Call: call}
+}
+
+// MockStreamFlowControllerIsConnectionBlockedCall wrap *gomock.Call
+type MockStreamFlowControllerIsConnectionBlockedCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockStreamFlowControllerIsConnectionBlockedCall) Return(arg0 bool) *MockStreamFlowControllerIsConnectionBlockedCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockStreamFlowControllerIsConnectionBlockedCall) Do(f func() bool) *MockStreamFlowControllerIsConnectionBlockedCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockStreamFlowControllerIsConnectionBlockedCall) DoAndReturn(f func() bool) *MockStreamFlowControllerIsConnectionBlockedCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // UpdateSendWindow mocks base method.
 func (m *MockStreamFlowController) UpdateSendWindow(arg0 protocol.ByteCount) bool {
 	m.ctrl.T.Helper()
