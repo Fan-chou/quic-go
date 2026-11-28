@@ -149,6 +149,7 @@ type connection struct {
 	packer        packer
 	mtuDiscoverer mtuDiscoverer // initialized when the transport parameters are received
 
+	currentMTU             atomic.Uint32
 	maxPayloadSizeEstimate atomic.Uint32
 
 	initialStream       *cryptoStream
@@ -282,7 +283,8 @@ var newConnection = func(
 		s.tracer,
 		s.logger,
 	)
-	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
+	s.currentMTU.Store(uint32(s.config.InitialPacketSize))
+	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxDatagramPayloadSize(protocol.ByteCount(s.config.InitialPacketSize), s.connIDManager.ActiveConnIDLen())))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
 	params := &wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:   protocol.ByteCount(s.config.InitialStreamReceiveWindow),
@@ -394,7 +396,8 @@ var newClientConnection = func(
 		s.tracer,
 		s.logger,
 	)
-	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
+	s.currentMTU.Store(uint32(s.config.InitialPacketSize))
+	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxDatagramPayloadSize(protocol.ByteCount(s.config.InitialPacketSize), s.connIDManager.ActiveConnIDLen())))
 	oneRTTStream := newCryptoStream()
 	params := &wire.TransportParameters{
 		InitialMaxStreamDataBidiRemote: protocol.ByteCount(s.config.InitialStreamReceiveWindow),
@@ -2555,8 +2558,36 @@ func (s *connection) onStreamCompleted(id protocol.StreamID) {
 }
 
 func (s *connection) onMTUIncreased(mtu protocol.ByteCount) {
-	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(mtu)))
+	s.currentMTU.Store(uint32(mtu))
+	s.maxPayloadSizeEstimate.Store(uint32(estimateMaxDatagramPayloadSize(mtu, s.connIDManager.ActiveConnIDLen())))
 	s.sentPacketHandler.SetMaxDatagramSize(mtu)
+}
+
+func (s *connection) currentMaxDatagramDataLen() protocol.ByteCount {
+	f := &wire.DatagramFrame{DataLenPresent: true}
+	peerParams := s.peerParams.Load()
+	var peerLimit protocol.ByteCount
+	if peerParams != nil {
+		peerLimit = f.MaxDataLen(peerParams.MaxDatagramFrameSize, s.version)
+	}
+	mtu := protocol.ByteCount(s.currentMTU.Load())
+	var pathLimit protocol.ByteCount
+	if mtu > 0 {
+		pathLimit = estimateMaxDatagramPayloadSize(mtu, s.connIDManager.ActiveConnIDLen())
+	} else {
+		pathLimit = protocol.ByteCount(s.maxPayloadSizeEstimate.Load())
+	}
+	return min(peerLimit, pathLimit)
+}
+
+// MaxDatagramPayloadSize reports the maximum RFC 9221 DATAGRAM payload length
+// that currently fits within both peer transport parameters and the discovered
+// 1-RTT path MTU.
+func (s *connection) MaxDatagramPayloadSize() int {
+	if !s.supportsDatagrams() {
+		return 0
+	}
+	return int(s.currentMaxDatagramDataLen())
 }
 
 func (s *connection) SendDatagram(p []byte) error {
@@ -2574,10 +2605,7 @@ func (s *connection) SendDatagramContext(ctx context.Context, p []byte) error {
 	// The queued packet and its tracer retain the frame after serialization.
 	// Send frames are independently owned; only receive frames use the pool.
 	f := &wire.DatagramFrame{DataLenPresent: true}
-	maxDataLen := min(
-		f.MaxDataLen(s.peerParams.Load().MaxDatagramFrameSize, s.version),
-		protocol.ByteCount(s.maxPayloadSizeEstimate.Load()),
-	)
+	maxDataLen := s.currentMaxDatagramDataLen()
 	if protocol.ByteCount(len(p)) > maxDataLen {
 		return &DatagramTooLargeError{MaxDataLen: int64(maxDataLen)}
 	}
@@ -2612,11 +2640,25 @@ func (s *connection) NextConnection(ctx context.Context) (Connection, error) {
 	return s, nil
 }
 
+// estimateMaxDatagramPayloadSize computes the largest RFC 9221 DATAGRAM
+// payload that fits in a 1-RTT short-header packet for the given path MTU and
+// active destination connection ID length.
+func estimateMaxDatagramPayloadSize(mtu protocol.ByteCount, destConnIDLen int) protocol.ByteCount {
+	if destConnIDLen < 0 || destConnIDLen > 20 {
+		destConnIDLen = 20
+	}
+	// Short header: 1B flags + destConnIDLen + up to 4B packet number + 16B AEAD tag,
+	// plus DATAGRAM frame header with length: 1B type + up to 2B varint length.
+	overhead := protocol.ByteCount(1 + destConnIDLen + 4 + 16 + 3)
+	if mtu <= overhead {
+		return 0
+	}
+	return mtu - overhead
+}
+
 // estimateMaxPayloadSize estimates the maximum payload size for short header packets.
-// It is not very sophisticated: it just subtracts the size of header (assuming the maximum
-// connection ID length), and the size of the encryption tag.
 func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
-	return mtu - 1 /* type byte */ - 20 /* maximum connection ID length */ - 16 /* tag size */
+	return estimateMaxDatagramPayloadSize(mtu, 20)
 }
 
 func (s *connection) SetCongestionControl(cc congestion.CongestionControl) {

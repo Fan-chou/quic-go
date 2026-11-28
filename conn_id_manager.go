@@ -2,6 +2,7 @@ package quic
 
 import (
 	"fmt"
+	"sync/atomic"
 
 	"github.com/olicesx/quic-go/internal/protocol"
 	"github.com/olicesx/quic-go/internal/qerr"
@@ -23,6 +24,7 @@ type connIDManager struct {
 	activeSequenceNumber      uint64
 	highestRetired            uint64
 	activeConnectionID        protocol.ConnectionID
+	activeConnIDLen           atomic.Int32
 	activeStatelessResetToken *protocol.StatelessResetToken
 
 	// We change the connection ID after sending on average
@@ -45,12 +47,14 @@ func newConnIDManager(
 	removeStatelessResetToken func(protocol.StatelessResetToken),
 	queueControlFrame func(wire.Frame),
 ) *connIDManager {
-	return &connIDManager{
+	m := &connIDManager{
 		activeConnectionID:        initialDestConnID,
 		addStatelessResetToken:    addStatelessResetToken,
 		removeStatelessResetToken: removeStatelessResetToken,
 		queueControlFrame:         queueControlFrame,
 	}
+	m.activeConnIDLen.Store(int32(initialDestConnID.Len()))
+	return m
 }
 
 func (h *connIDManager) AddFromPreferredAddress(connID protocol.ConnectionID, resetToken protocol.StatelessResetToken) error {
@@ -162,6 +166,7 @@ func (h *connIDManager) updateConnectionID() {
 	front := h.queue.Remove(h.queue.Front())
 	h.activeSequenceNumber = front.SequenceNumber
 	h.activeConnectionID = front.ConnectionID
+	h.activeConnIDLen.Store(int32(front.ConnectionID.Len()))
 	h.activeStatelessResetToken = &front.StatelessResetToken
 	h.packetsSinceLastChange = 0
 	h.packetsPerConnectionID = protocol.PacketsPerConnectionID/2 + uint32(h.rand.Int31n(protocol.PacketsPerConnectionID))
@@ -182,6 +187,14 @@ func (h *connIDManager) ChangeInitialConnID(newConnID protocol.ConnectionID) {
 		panic("expected first connection ID to have sequence number 0")
 	}
 	h.activeConnectionID = newConnID
+	h.activeConnIDLen.Store(int32(newConnID.Len()))
+}
+
+func (h *connIDManager) ActiveConnIDLen() int {
+	if h == nil {
+		return 20
+	}
+	return int(h.activeConnIDLen.Load())
 }
 
 // is called when the server provides a stateless reset token in the transport parameters
